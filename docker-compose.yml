@@ -7,5 +7,5 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - src/go_arlo_agency/.env
+      - src/.env
     restart: always
