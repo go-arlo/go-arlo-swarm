@@ -127,8 +127,8 @@ class MarketAnalysis(BaseTool):
         print(f"Total volume: {total_volume}")
         print(f"Has movement: {has_movement}")
         
-        if not has_movement or total_volume < 50000:  # Adjusted threshold
-            print(f"⚠️ WARNING: Low activity/flat market detected")
+        if not has_movement or total_volume < 50000:
+            print(f"WARNING: Low activity/flat market detected")
             print(f"Technical indicators may not be reliable in flat markets")
         
         df['vwap'] = (df['h'] + df['l'] + df['c']) / 3 * df['v']

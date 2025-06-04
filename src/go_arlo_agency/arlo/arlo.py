@@ -204,7 +204,6 @@ class Arlo(Agent):
             }
 
             try:
-                # Convert report_data to a JSON string and then back to a dict to ensure proper formatting
                 report_json = json.dumps(report_data)
                 report_dict = json.loads(report_json)
                 

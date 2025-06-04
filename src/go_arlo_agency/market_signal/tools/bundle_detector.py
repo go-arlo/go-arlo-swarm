@@ -426,7 +426,7 @@ class BundleDetector(BaseTool):
             if suspicious_blocks:
                 metadata = getattr(self, '_cached_metadata', {})
                 if not metadata:
-                    print("⚠️ No cached metadata found, using fallback")
+                    print("No cached metadata found, using fallback")
                     metadata = {}
                     
                 total_supply = float(metadata.get('totalSupplyFormatted', 0))
@@ -438,7 +438,7 @@ class BundleDetector(BaseTool):
                 risk_level = self._get_risk_level(supply_percentage)
                 
                 total_time = time.time() - start_time
-                print(f"\n🎯 OPTIMIZED ANALYSIS COMPLETED in {total_time:.2f}s")
+                print(f"\nANALYSIS COMPLETED in {total_time:.2f}s")
                 
                 return {
                     "has_bundled_trades": True,
