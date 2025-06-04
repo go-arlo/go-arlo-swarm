@@ -1,6 +1,7 @@
 from agency_swarm.tools import BaseTool
 from pydantic import Field
 from typing import Dict, Any, Optional
+import re
 
 
 class Summary(BaseTool):
@@ -53,6 +54,14 @@ class Summary(BaseTool):
         Returns a formatted summary with an original overall assessment.
         """
         try:
+            if len(self.token_ticker) > 20 or not self.token_ticker.replace('_', '').replace('-', '').isalnum():
+                print(f"WARNING: token_ticker appears to be a contract address: {self.token_ticker}")
+                if len(self.token_ticker) > 20:
+                    self.token_ticker = f"TOKEN_{self.token_ticker[:6]}..."
+                    print(f"Using simplified ticker: {self.token_ticker}")
+            else:
+                print(f"Using ticker: {self.token_ticker}")
+            
             if not isinstance(self.token_safety, dict):
                 print(f"Warning: token_safety is not a dictionary: {type(self.token_safety)}")
                 self.token_safety = {}
@@ -188,7 +197,7 @@ class Summary(BaseTool):
         
         for point in holder_points:
             if any(term in point.lower() for term in ["well-balanced", "distribution", "retail", "balanced"]):
-                if "concentration" not in point.lower() and "risk" not in point.lower():
+                if "highly concentrated" not in point.lower() and "risk" not in point.lower():
                     strengths.append(f"Distribution: {point}")
                     for term in ["well-balanced", "distribution", "retail", "balanced"]:
                         if term in point.lower():
@@ -213,7 +222,7 @@ class Summary(BaseTool):
                 concerns.append(f"Social: {point}")
         
         for point in holder_points:
-            if any(term in point.lower() for term in ["concentration", "whale", "risk", "centralized"]):
+            if any(term in point.lower() for term in ["highly concentrated", "whale", "risk", "centralized"]):
                 concerns.append(f"Distribution: {point}")
         
         filtered_concerns = []
@@ -268,36 +277,44 @@ class Summary(BaseTool):
         
     def _generate_market_liquidity_paragraph(self, strengths, concerns, market_points):
         """Generate a paragraph focused on market and liquidity insights"""
-        market_insights = []
+        bundle_finding = next((point for point in self.market_position.get("key_points", []) if "bundle" in point.lower()), "")
         
-        strong_liquidity = any("indicates strong liquidity" in point.lower() for point in market_points)
-        limited_liquidity = any("limited liquidity" in point.lower() for point in market_points)
+        bundle_analysis = ""
+        if "not a significant amount" in bundle_finding.lower():
+            bundle_analysis = "Bundle trading activity on launch date was minimal, reducing concerns about coordinated manipulation or artificial price inflation."
+        elif "%" in bundle_finding and any(risk in bundle_finding.upper() for risk in ["HIGH RISK", "VERY HIGH RISK", "CONSIDERABLE RISK", "MODERATE"]):
+            risk_level = "HIGH RISK" if "HIGH RISK" in bundle_finding.upper() else "VERY HIGH RISK" if "VERY HIGH RISK" in bundle_finding.upper() else "CONSIDERABLE RISK" if "CONSIDERABLE RISK" in bundle_finding.upper() else "MODERATE"
+            
+            strong_liquidity = any("strong liquidity" in point.lower() for point in self.market_position.get("key_points", []))
+            well_balanced_distribution = self.holder_analysis.get("concentration") == "well-balanced"
+            
+            if risk_level in ["HIGH RISK", "VERY HIGH RISK"]:
+                bundle_analysis = f"Launch date bundle activity presents {risk_level.lower()} due to coordinated buying patterns. "
+                if strong_liquidity and well_balanced_distribution:
+                    bundle_analysis += "However, this risk is partially mitigated by strong current liquidity conditions and well-balanced holder distribution that has developed since launch."
+                elif strong_liquidity:
+                    bundle_analysis += "Strong liquidity conditions provide some mitigation, though holder concentration should be monitored."
+                elif well_balanced_distribution:
+                    bundle_analysis += "The well-balanced current holder distribution provides some mitigation of the initial coordination concerns."
+                else:
+                    bundle_analysis += "This risk remains elevated and requires careful consideration for position sizing."
+            else:
+                bundle_analysis = f"Launch date bundle activity shows {risk_level.lower()}, with current market conditions providing adequate mitigation through improved liquidity and distribution patterns."
         
-        if strong_liquidity:
-            market_insights.append("Strong liquidity provides favorable execution conditions for position entries and exits.")
-        elif limited_liquidity or any("liquidity" in s.lower() and "limited" in s.lower() for s in concerns):
-            market_insights.append("Limited liquidity creates execution risk for larger positions and potential price volatility.")
+        market_summary = self.market_position.get("summary", "")
         
-        vwap_premium = next((point for point in market_points if "vwap" in point.lower() and "premium" in point.lower()), None)
-        if vwap_premium:
-            market_insights.append(vwap_premium)
+        paragraphs = market_summary.split('\n\n')
         
-        overbought = any("overbought" in point.lower() or "rsi" in point.lower() and "high" in point.lower() for point in market_points)
-        if overbought:
-            market_insights.append("Technical indicators suggest overbought conditions which may lead to near-term price correction.")
+        remaining_paragraphs = paragraphs[1:] if len(paragraphs) > 1 else []
+        remaining_paragraphs = [p.strip() for p in remaining_paragraphs if p.strip()]
+        remaining_summary = '\n\n'.join(remaining_paragraphs)
         
-        momentum = any("momentum" in point.lower() for point in market_points) or any("momentum" in s.lower() for s in strengths)
-        if momentum:
-            market_insights.append("Positive momentum detected in recent price action.")
-        
-        volatility = any("volatil" in point.lower() or "spike" in point.lower() for point in market_points)
-        if volatility:
-            market_insights.append("Recent price volatility indicates potential for significant short-term fluctuations.")
-        
-        if not market_insights:
-            return "Market metrics indicate standard trading conditions requiring normal precautions when entering positions."
-        
-        return " ".join(market_insights)
+        if bundle_analysis and remaining_summary:
+            return f"{bundle_analysis}\n\n{remaining_summary}"
+        elif bundle_analysis:
+            return bundle_analysis
+        else:
+            return remaining_summary or "Market analysis not available."
         
     def _generate_social_paragraph(self, strengths, concerns, sentiment_points):
         """Generate a paragraph focused on social sentiment insights"""
@@ -386,7 +403,7 @@ class Summary(BaseTool):
         if security_concerns:
             security_holder_insights.append("Identified security vulnerabilities represent fundamental risk factors that could impact long-term viability.")
         
-        concentration_concern = any("highly concentrated" in point.lower() for point in holder_points) or any("concentration" in s.lower() or "whale" in s.lower() for s in concerns)
+        concentration_concern = any("highly concentrated" in point.lower() for point in holder_points) or any("highly concentrated" in s.lower() or "whale" in s.lower() for s in concerns)
         if concentration_concern:
             security_holder_insights.append("High holder concentration increases vulnerability to market manipulation and potential for sudden price movements from large selling events.")
         

@@ -50,10 +50,22 @@ class MarketAnalysis(BaseTool):
             print(f"\nError details: {str(e)}")
             return {
                 "error": f"Analysis failed: {str(e)}",
-                "market_metrics": None,
-                "technical_analysis": None,
-                "market_score": None,
-                "summary": "Analysis failed due to error"
+                "market_metrics": {
+                    "volume_metrics": {"volume_24h": 0, "volume_change_24h": 0, "buy_volume_ratio": 0, "unique_wallets_24h": 0},
+                    "price_metrics": {"price": 0, "price_change_24h": 0, "price_change_1h": 0},
+                    "trading_metrics": {"total_trades_24h": 0, "buy_count_24h": 0, "sell_count_24h": 0}
+                },
+                "technical_analysis": {
+                    "momentum_trading": {},
+                    "day_trading": {},
+                    "swing_trading": {}
+                },
+                "market_score": {"score": 0, "positive_points": 0, "negative_points": 0, "momentum_score": 0, "daytrading_score": 0, "swing_score": 0},
+                "summary": {
+                    "momentum_trading": [],
+                    "day_trading": [],
+                    "swing_trading": []
+                }
             }
 
     def _get_trade_data(self):
@@ -98,32 +110,214 @@ class MarketAnalysis(BaseTool):
         return df
 
     def _calculate_technical_indicators(self, df):
-        """Calculate technical indicators from OHLCV data"""
+        """Calculate technical indicators organized by trading style"""
         if df.empty:
-            return {}
-            
+            return {
+                "momentum_trading": {},
+                "day_trading": {},
+                "swing_trading": {}
+            }
+        
+        price_range = df['c'].max() - df['c'].min()
+        total_volume = df['v'].sum()
+        has_movement = price_range > (df['c'].mean() * 0.001)  # > 0.1% price range
+        
+        print(f"🔍 MARKET ACTIVITY CHECK:")
+        print(f"Price range: ${price_range:.8f} ({((price_range/df['c'].mean())*100):.3f}%)")
+        print(f"Total volume: {total_volume}")
+        print(f"Has movement: {has_movement}")
+        
+        if not has_movement or total_volume < 50000:
+            print(f"WARNING: Low activity/flat market detected")
+            print(f"Technical indicators may not be reliable in flat markets")
+        
         df['vwap'] = (df['h'] + df['l'] + df['c']) / 3 * df['v']
-        df['vwap'] = df['vwap'].cumsum() / df['v'].cumsum()
         
-        df['sma_20'] = df['c'].rolling(window=20).mean()
-        df['ema_20'] = df['c'].ewm(span=20, adjust=False).mean()
+        if total_volume > 0:
+            df['vwap'] = df['vwap'].cumsum() / df['v'].cumsum()
+        else:
+            df['vwap'] = (df['h'] + df['l'] + df['c']) / 3
         
+        momentum_indicators = self._calculate_momentum_indicators(df, has_movement)
+        
+        daytrading_indicators = self._calculate_daytrading_indicators(df)
+        
+        swing_indicators = self._calculate_swing_indicators(df, has_movement)
+        
+        return {
+            "momentum_trading": momentum_indicators,
+            "day_trading": daytrading_indicators,
+            "swing_trading": swing_indicators
+        }
+    
+    def _calculate_momentum_indicators(self, df, has_movement):
+        """Calculate momentum trading indicators: RSI, Stochastic, Bollinger Bands"""
+        df = df.copy()
+        
+        # RSI (14-period)
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        
+        loss = loss.replace(0, 0.0001)
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
         
-        latest_data = df.iloc[-1]
+        if not has_movement:
+            df['rsi'] = 50
+        
+        # Stochastic Oscillator (14, 3, 3)
+        low_14 = df['l'].rolling(window=14).min()
+        high_14 = df['h'].rolling(window=14).max()
+        high_low_diff = high_14 - low_14
+        
+        high_low_diff = high_low_diff.replace(0, 0.0001)
+        df['stoch_k'] = ((df['c'] - low_14) / high_low_diff) * 100
+        df['stoch_d'] = df['stoch_k'].rolling(window=3).mean()
+        
+        if not has_movement:
+            df['stoch_k'] = 50
+            df['stoch_d'] = 50
+        
+        # Bollinger Bands (20-period, 2 std dev)
+        df['bb_sma'] = df['c'].rolling(window=20).mean()
+        df['bb_std'] = df['c'].rolling(window=20).std()
+        df['bb_upper'] = df['bb_sma'] + (2 * df['bb_std'])
+        df['bb_lower'] = df['bb_sma'] - (2 * df['bb_std'])
+        bb_diff = df['bb_upper'] - df['bb_lower']
+        bb_diff = bb_diff.replace(0, 0.0001)
+        df['bb_position'] = (df['c'] - df['bb_lower']) / bb_diff
+        
+        latest = df.iloc[-1]
+        return {
+            "rsi": latest['rsi'],
+            "rsi_signal": "overbought" if latest['rsi'] > 70 else "oversold" if latest['rsi'] < 30 else "neutral",
+            "stochastic_k": latest['stoch_k'],
+            "stochastic_d": latest['stoch_d'], 
+            "stochastic_signal": "overbought" if latest['stoch_k'] > 80 else "oversold" if latest['stoch_k'] < 20 else "neutral",
+            "bollinger_position": latest['bb_position'],
+            "bollinger_signal": "squeeze" if latest['bb_upper'] - latest['bb_lower'] < latest['bb_sma'] * 0.1 else "expansion",
+            "price_vs_bb_upper": (latest['c'] - latest['bb_upper']) / latest['bb_upper'] * 100,
+            "price_vs_bb_lower": (latest['c'] - latest['bb_lower']) / latest['bb_lower'] * 100
+        }
+    
+    def _calculate_daytrading_indicators(self, df):
+        """Calculate day trading indicators: VWAP, Volume indicators"""
+        latest = df.iloc[-1]
+        
+        # On-Balance Volume (OBV)
+        df = df.copy()
+        df.loc[df.index[0], 'obv'] = 0
+        
+        for i in range(1, len(df)):
+            prev_close = df['c'].iloc[i-1]
+            curr_close = df['c'].iloc[i]
+            prev_obv = df['obv'].iloc[i-1]
+            curr_volume = df['v'].iloc[i]
+            
+            if curr_close > prev_close:
+                df.loc[df.index[i], 'obv'] = prev_obv + curr_volume
+            elif curr_close < prev_close:
+                df.loc[df.index[i], 'obv'] = prev_obv - curr_volume
+            else:
+                df.loc[df.index[i], 'obv'] = prev_obv
+        
+        # Chaikin Money Flow (CMF) - 20 period
+        high_low_diff = df['h'] - df['l']
+        high_low_diff = high_low_diff.replace(0, 0.0001)
+        df['mf_multiplier'] = ((df['c'] - df['l']) - (df['h'] - df['c'])) / high_low_diff
+        df['mf_volume'] = df['mf_multiplier'] * df['v']
+        volume_sum = df['v'].rolling(window=20).sum()
+        volume_sum = volume_sum.replace(0, 0.0001)
+        df['cmf'] = df['mf_volume'].rolling(window=20).sum() / volume_sum
+        
+        # Volume trend analysis
+        volume_sma_short = df['v'].rolling(window=5).mean()
+        volume_sma_long = df['v'].rolling(window=20).mean()
+        
+        latest = df.iloc[-1]
         
         return {
-            "vwap": latest_data['vwap'],
-            "sma_20": latest_data['sma_20'],
-            "ema_20": latest_data['ema_20'],
-            "rsi": latest_data['rsi'],
-            "price_to_vwap": latest_data['c'] / latest_data['vwap'] - 1,
-            "volatility": df['c'].pct_change().std() * 100,
-            "volume_trend": (df['v'].iloc[-5:].mean() / df['v'].iloc[-10:-5].mean() - 1) * 100
+            "vwap": latest['vwap'],
+            "price_to_vwap": (latest['c'] / latest['vwap'] - 1) * 100 if latest['vwap'] > 0 and not pd.isna(latest['vwap']) else 0,
+            "vwap_signal": "above" if latest['c'] > latest['vwap'] else "below",
+            "obv": latest['obv'],
+            "obv_trend": "bullish" if df['obv'].iloc[-1] > df['obv'].iloc[-5] else "bearish",
+            "cmf": latest['cmf'],
+            "cmf_signal": "bullish" if latest['cmf'] > 0.1 else "bearish" if latest['cmf'] < -0.1 else "neutral",
+            "volume_ratio": volume_sma_short.iloc[-1] / volume_sma_long.iloc[-1] if volume_sma_long.iloc[-1] > 0 else 1,
+            "volume_trend": (volume_sma_short.iloc[-1] / volume_sma_long.iloc[-1] - 1) * 100 if volume_sma_long.iloc[-1] > 0 else 0
+        }
+    
+    def _calculate_swing_indicators(self, df, has_movement):
+        """Calculate swing trading indicators: Fibonacci, MACD, ATR, EMA 50/200"""
+        df = df.copy()
+        
+        # EMA 50 and 200
+        df['ema_50'] = df['c'].ewm(span=50, adjust=False).mean()
+        df['ema_200'] = df['c'].ewm(span=200, adjust=False).mean()
+        
+        # MACD (12, 26, 9)
+        df['ema_12'] = df['c'].ewm(span=12, adjust=False).mean()
+        df['ema_26'] = df['c'].ewm(span=26, adjust=False).mean()
+        df['macd_line'] = df['ema_12'] - df['ema_26']
+        df['macd_signal'] = df['macd_line'].ewm(span=9, adjust=False).mean()
+        df['macd_histogram'] = df['macd_line'] - df['macd_signal']
+        
+        # ATR (14-period) - Fixed True Range calculation
+        df = df.copy()
+        df['prev_close'] = df['c'].shift(1)
+        
+        # Calculate True Range components
+        df['tr1'] = df['h'] - df['l']  # High - Low
+        df['tr2'] = abs(df['h'] - df['prev_close'])  # |High - Previous Close|
+        df['tr3'] = abs(df['l'] - df['prev_close'])  # |Low - Previous Close|
+        
+        df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        df['atr'] = df['tr'].rolling(window=14).mean()
+        
+        # For flat markets, set minimum ATR based on price (0.1% of current price)
+        if not has_movement:
+            current_price = df['c'].iloc[-1]
+            min_atr = current_price * 0.001  # 0.1% minimum volatility
+            df['atr'] = df['atr'].fillna(min_atr).replace(0, min_atr)
+        
+        # Fibonacci retracements (last 20 periods high/low)
+        recent_high = df['h'].iloc[-20:].max()
+        recent_low = df['l'].iloc[-20:].min()
+        fib_diff = recent_high - recent_low
+        
+        fib_levels = {
+            '23.6%': recent_high - 0.236 * fib_diff,
+            '38.2%': recent_high - 0.382 * fib_diff,
+            '50.0%': recent_high - 0.5 * fib_diff,
+            '61.8%': recent_high - 0.618 * fib_diff,
+            '78.6%': recent_high - 0.786 * fib_diff
+        }
+        
+        # Update latest after all calculations
+        latest = df.iloc[-1]
+        current_price = latest['c']
+        
+        # Find closest Fibonacci level
+        closest_fib = min(fib_levels.items(), key=lambda x: abs(x[1] - current_price))
+        
+        return {
+            "ema_50": latest['ema_50'],
+            "ema_200": latest['ema_200'],
+            "ema_cross_signal": "bullish" if latest['ema_50'] > latest['ema_200'] else "bearish",
+            "macd_line": latest['macd_line'],
+            "macd_signal": latest['macd_signal'],
+            "macd_histogram": latest['macd_histogram'],
+            "macd_trend": "bullish" if latest['macd_histogram'] > 0 else "bearish",
+            "atr": latest['atr'],
+            "atr_percent": (latest['atr'] / current_price) * 100,
+            "fibonacci_levels": fib_levels,
+            "closest_fib_level": closest_fib[0],
+            "closest_fib_price": closest_fib[1],
+            "fib_distance": abs(current_price - closest_fib[1]) / current_price * 100,
+            "recent_high": recent_high,
+            "recent_low": recent_low
         }
 
     def _calculate_market_metrics(self, trade_data):
@@ -165,11 +359,12 @@ class MarketAnalysis(BaseTool):
             }
 
     def _calculate_market_score(self, market_metrics, technical_analysis):
-        """Calculate market score based on metrics"""
+        """Calculate market score based on all trading style indicators"""
         score = 50
         positive_points = 0
         negative_points = 0
         
+        # Volume metrics
         volume_metrics = market_metrics['volume_metrics']
         if volume_metrics['volume_24h'] > 1000000:
             score += 10
@@ -179,7 +374,9 @@ class MarketAnalysis(BaseTool):
         else:
             negative_points += 1
         
-        volume_trend = technical_analysis.get('volume_trend', 0)
+        # Day trading indicators
+        day_trading = technical_analysis.get('day_trading', {})
+        volume_trend = day_trading.get('volume_trend', 0)
         if volume_trend < -20:
             score -= 10
             negative_points += 1
@@ -187,17 +384,17 @@ class MarketAnalysis(BaseTool):
             score += 10
             positive_points += 1
         
-        price_metrics = market_metrics['price_metrics']
-        price_change = abs(price_metrics['price_change_24h'])
-        if price_change < 10:
+        vwap_diff = day_trading.get('price_to_vwap', 0)
+        if abs(vwap_diff) > 15:
+            score -= 10
+            negative_points += 1
+        elif abs(vwap_diff) < 5:
             score += 10
             positive_points += 1
-        elif price_change < 20:
-            score += 7
-        else:
-            negative_points += 1
         
-        rsi = technical_analysis.get('rsi', 50)
+        # Momentum indicators
+        momentum = technical_analysis.get('momentum_trading', {})
+        rsi = momentum.get('rsi', 50)
         if rsi < 30:
             score -= 10
             negative_points += 1
@@ -208,19 +405,105 @@ class MarketAnalysis(BaseTool):
             score += 10
             positive_points += 1
         
-        vwap_diff = technical_analysis.get('price_to_vwap', 0) * 100
-        if abs(vwap_diff) > 15:
-            score -= 10
+        # Swing trading indicators
+        swing = technical_analysis.get('swing_trading', {})
+        if swing.get('ema_cross_signal') == 'bullish':
+            score += 5
+            positive_points += 1
+        elif swing.get('ema_cross_signal') == 'bearish':
+            score -= 5
             negative_points += 1
-        elif abs(vwap_diff) < 5:
+            
+        if swing.get('macd_trend') == 'bullish':
+            score += 5
+            positive_points += 1
+        elif swing.get('macd_trend') == 'bearish':
+            score -= 5
+            negative_points += 1
+        
+        # Price stability
+        price_metrics = market_metrics['price_metrics']
+        price_change = abs(price_metrics['price_change_24h'])
+        if price_change < 10:
             score += 10
             positive_points += 1
+        elif price_change < 20:
+            score += 7
+        else:
+            negative_points += 1
         
         return {
             'score': max(45, min(100, score)),
             'positive_points': positive_points,
-            'negative_points': negative_points
+            'negative_points': negative_points,
+            'momentum_score': self._get_momentum_score(momentum),
+            'daytrading_score': self._get_daytrading_score(day_trading),
+            'swing_score': self._get_swing_score(swing)
         }
+    
+    def _get_momentum_score(self, momentum):
+        """Calculate momentum trading score"""
+        score = 0
+        if momentum.get('rsi_signal') == 'neutral':
+            score += 2
+        elif momentum.get('rsi_signal') in ['overbought', 'oversold']:
+            score += 1
+            
+        if momentum.get('stochastic_signal') == 'neutral':
+            score += 2
+        elif momentum.get('stochastic_signal') in ['overbought', 'oversold']:
+            score += 1
+            
+        bb_pos = momentum.get('bollinger_position', 0.5)
+        if 0.2 <= bb_pos <= 0.8:
+            score += 2
+        elif bb_pos < 0.1 or bb_pos > 0.9:
+            score += 1
+            
+        return min(score, 6)
+    
+    def _get_daytrading_score(self, daytrading):
+        """Calculate day trading score"""
+        score = 0
+        
+        vwap_diff = abs(daytrading.get('price_to_vwap', 0))
+        if vwap_diff < 2:
+            score += 2
+        elif vwap_diff < 5:
+            score += 1
+            
+        if daytrading.get('cmf_signal') == 'bullish':
+            score += 2
+        elif daytrading.get('cmf_signal') == 'neutral':
+            score += 1
+            
+        volume_trend = daytrading.get('volume_trend', 0)
+        if volume_trend > 10:
+            score += 2
+        elif volume_trend > 0:
+            score += 1
+            
+        return min(score, 6)
+    
+    def _get_swing_score(self, swing):
+        """Calculate swing trading score"""
+        score = 0
+        
+        if swing.get('ema_cross_signal') == 'bullish':
+            score += 2
+        
+        if swing.get('macd_trend') == 'bullish':
+            score += 2
+            
+        atr_percent = swing.get('atr_percent', 0)
+        if 1 <= atr_percent <= 5:
+            score += 2
+        elif atr_percent < 1:
+            score += 0
+        else:
+            score += 1
+            
+        return min(score, 6)
 
     def _calculate_vwap_metrics(self, trade_data):
         """Calculate VWAP and related metrics with reasonable bounds"""
@@ -251,81 +534,147 @@ class MarketAnalysis(BaseTool):
             }
 
     def _generate_market_summary(self, market_metrics, technical_analysis):
-        """Generate comprehensive market summary with volume fallback logic"""
-        summary = []
+        """Generate market summary organized by trading styles"""
+        summary = {
+            "momentum_trading": [],
+            "day_trading": [],
+            "swing_trading": []
+        }
         
-        def get_volume_data(trade_data):
-            if trade_data.get('volume_history_24h', 0) != 0:
-                return {
-                    'volume': trade_data.get('volume_24h_usd', 0),
-                    'change': trade_data.get('volume_24h_change_percent'),
-                    'period': '24h'
-                }
-            elif trade_data.get('volume_history_4h', 0) != 0:
-                return {
-                    'volume': trade_data.get('volume_4h_usd', 0),
-                    'change': trade_data.get('volume_4h_change_percent'),
-                    'period': '4h'
-                }
-            else:
-                return {
-                    'volume': trade_data.get('volume_1h_usd', 0),
-                    'change': trade_data.get('volume_1h_change_percent'),
-                    'period': '1h'
-                }
+        # MOMENTUM TRADING SIGNALS
+        momentum = technical_analysis.get('momentum_trading', {})
+        if momentum:
+            rsi = momentum.get('rsi', 0)
+            stoch_k = momentum.get('stochastic_k', 0)
+            bb_pos = momentum.get('bollinger_position', 0) * 100
+            
+            summary["momentum_trading"].extend([
+                f"RSI: {rsi:.1f} ({momentum.get('rsi_signal', 'neutral')})",
+                f"Stochastic %K: {stoch_k:.1f} ({momentum.get('stochastic_signal', 'neutral')})", 
+                f"Bollinger Bands: {bb_pos:.1f}% position ({momentum.get('bollinger_signal', 'normal')})"
+            ])
+            
+            if momentum.get('rsi_signal') in ['overbought', 'oversold']:
+                summary["momentum_trading"].append(f"⚠️ RSI showing {momentum.get('rsi_signal')} conditions")
+            if momentum.get('bollinger_signal') == 'squeeze':
+                summary["momentum_trading"].append("🔸 Bollinger Band squeeze detected - volatility expansion expected")
         
-        volume_data = get_volume_data(self.trade_data)
-        volume_period = volume_data['period']
-        volume = volume_data['volume']
-        volume_change = volume_data.get('change', 0)
+        # DAY TRADING / SCALPING SIGNALS  
+        daytrading = technical_analysis.get('day_trading', {})
+        if daytrading:
+            vwap = daytrading.get('vwap', 0)
+            price_to_vwap = daytrading.get('price_to_vwap', 0)
+            cmf = daytrading.get('cmf', 0)
+            obv_trend = daytrading.get('obv_trend', 'neutral')
+            volume_trend = daytrading.get('volume_trend', 0)
+  
+            summary["day_trading"].extend([
+                f"VWAP: ${vwap:.6f} (price {price_to_vwap:+.2f}% vs VWAP)",
+                f"Chaikin Money Flow: {cmf:.3f} ({daytrading.get('cmf_signal', 'neutral')})",
+                f"OBV Trend: {obv_trend}",
+                f"Volume Trend: {volume_trend:+.1f}% (5-period vs 20-period)"
+            ])
+            
+            if abs(price_to_vwap) > 5:
+                direction = "above" if price_to_vwap > 0 else "below"
+                summary["day_trading"].append(f"🔸 Price significantly {direction} VWAP - potential mean reversion")
+            if daytrading.get('cmf_signal') == 'bullish':
+                summary["day_trading"].append("🟢 Strong money flow into the token")
+            elif daytrading.get('cmf_signal') == 'bearish':
+                summary["day_trading"].append("🔴 Money flowing out of the token")
         
-        summary.append(f"{volume_period} Volume: ${volume:,.2f} ({volume_change:+.2f}% change)")
-        
-        price = market_metrics['price_metrics']['price']
-        price_change_24h = market_metrics['price_metrics']['price_change_24h']
-        summary.append(f"Current Price: ${price:.4f} ({price_change_24h:+.2f}% 24h change)")
-        
-        rsi = technical_analysis.get('rsi')
-        if rsi:
-            if rsi > 70:
-                summary.append(f"Overbought conditions (RSI: {rsi:.2f})")
-            elif rsi < 30:
-                summary.append(f"Oversold conditions (RSI: {rsi:.2f})")
-        
-        vwap_metrics = self._calculate_vwap_metrics(self.trade_data)
-        vwap = vwap_metrics['vwap']
-        vwap_diff = vwap_metrics['vwap_diff_percent']
-        
-        if abs(vwap_diff) < 0.01:
-            summary.append(f"VWAP at ${vwap:.4f} shows minimal alignment with current price")
-        else:
-            if vwap_diff > 0:
-                term = "premium"
-            else:
-                term = "discount"
-                vwap_diff = abs(vwap_diff)
-            summary.append(f"VWAP at ${vwap:.4f} shows {vwap_diff:.2f}% {term} to price")
-        
-        volume_trend = technical_analysis.get('volume_trend', 0)
-        summary.append(f"Volume trend (5m vs previous): {volume_trend:+.2f}%")
-        
-        buy_volume_ratio = market_metrics['volume_metrics']['buy_volume_ratio'] * 100
-        summary.append(f"Buy volume ratio: {buy_volume_ratio:.1f}%")
+        # SWING TRADING SIGNALS
+        swing = technical_analysis.get('swing_trading', {})
+        if swing:
+            ema_50 = swing.get('ema_50', 0)
+            ema_200 = swing.get('ema_200', 0) 
+            macd_line = swing.get('macd_line', 0)
+            macd_signal = swing.get('macd_signal', 0)
+            atr_percent = swing.get('atr_percent', 0)
+            closest_fib = swing.get('closest_fib_level', 'N/A')
+            fib_distance = swing.get('fib_distance', 0)
+            
+            summary["swing_trading"].extend([
+                f"EMA 50/200: ${ema_50:.6f}/${ema_200:.6f} ({swing.get('ema_cross_signal', 'neutral')})",
+                f"MACD: {macd_line:.6f} vs Signal {macd_signal:.6f} ({swing.get('macd_trend', 'neutral')})",
+                f"ATR: {atr_percent:.2f}% of price",
+                f"Nearest Fibonacci: {closest_fib} ({fib_distance:.2f}% away)"
+            ])
+            
+            if swing.get('ema_cross_signal') == 'bullish':
+                summary["swing_trading"].append("🟢 Bullish EMA crossover - uptrend confirmed")
+            elif swing.get('ema_cross_signal') == 'bearish':
+                summary["swing_trading"].append("🔴 Bearish EMA crossover - downtrend confirmed")
+                
+            if swing.get('macd_trend') == 'bullish':
+                summary["swing_trading"].append("🟢 MACD showing bullish momentum")
+            elif swing.get('macd_trend') == 'bearish':
+                summary["swing_trading"].append("🔴 MACD showing bearish momentum")
+                
+            if fib_distance < 2:
+                summary["swing_trading"].append(f"🔸 Price near key Fibonacci level ({closest_fib}) - watch for bounce/break")
         
         return summary
 
 if __name__ == "__main__":
     tool = MarketAnalysis(
-        address="xDyCR9xqMLMxQbcdZyxgoXHXZwQuGuetAjMx8vkpump"
+        address="288k7P6sZA7cHGPATbKBHjqgditapKkVXjkAXKH3pump"
     )
     result = tool.run()
-    print("\nMarket Analysis Results:")
-    print("\nMarket Metrics:")
-    print(result['market_metrics'])
-    print("\nTechnical Analysis:")
-    print(result['technical_analysis'])
-    print("\nMarket Score:")
-    print(result['market_score'])
-    print("\nSummary:")
-    for point in result['summary']:
-        print(f"- {point}") 
+    print("\n" + "="*60)
+    print("📊 COMPREHENSIVE MARKET ANALYSIS")
+    print("="*60)
+    
+    print("\n📈 MARKET METRICS:")
+    market_metrics = result['market_metrics']
+    print(f"Volume 24h: ${market_metrics['volume_metrics']['volume_24h']:,.2f}")
+    print(f"Price: ${market_metrics['price_metrics']['price']:.6f}")
+    print(f"Price Change 24h: {market_metrics['price_metrics']['price_change_24h']:+.2f}%")
+    
+    print("\n🎯 TRADING STYLE ANALYSIS:")
+    ta = result['technical_analysis']
+    
+    print(f"\n🚀 MOMENTUM TRADING (Score: {result['market_score']['momentum_score']}/6):")
+    momentum = ta.get('momentum_trading', {})
+    if momentum:
+        print(f"  RSI: {momentum.get('rsi', 0):.1f} ({momentum.get('rsi_signal', 'N/A')})")
+        print(f"  Stochastic: {momentum.get('stochastic_k', 0):.1f} ({momentum.get('stochastic_signal', 'N/A')})")
+        print(f"  Bollinger Position: {momentum.get('bollinger_position', 0)*100:.1f}%")
+    
+    print(f"\n⚡ DAY TRADING / SCALPING (Score: {result['market_score']['daytrading_score']}/6):")
+    daytrading = ta.get('day_trading', {})
+    if daytrading:
+        print(f"  VWAP: ${daytrading.get('vwap', 0):.6f}")
+        print(f"  Price vs VWAP: {daytrading.get('price_to_vwap', 0):+.2f}%")
+        print(f"  CMF: {daytrading.get('cmf', 0):.3f} ({daytrading.get('cmf_signal', 'N/A')})")
+        print(f"  Volume Trend: {daytrading.get('volume_trend', 0):+.1f}%")
+    
+    print(f"\n📈 SWING TRADING (Score: {result['market_score']['swing_score']}/6):")
+    swing = ta.get('swing_trading', {})
+    if swing:
+        print(f"  EMA 50/200: ${swing.get('ema_50', 0):.6f}/${swing.get('ema_200', 0):.6f}")
+        print(f"  EMA Signal: {swing.get('ema_cross_signal', 'N/A')}")
+        print(f"  MACD: {swing.get('macd_trend', 'N/A')}")
+        print(f"  ATR: {swing.get('atr_percent', 0):.2f}% of price")
+        print(f"  Nearest Fib: {swing.get('closest_fib_level', 'N/A')} ({swing.get('fib_distance', 0):.1f}% away)")
+    
+    print(f"\n📊 OVERALL MARKET SCORE: {result['market_score']['score']}/100")
+    print(f"Positive Signals: {result['market_score']['positive_points']}")
+    print(f"Negative Signals: {result['market_score']['negative_points']}")
+    
+    print("\n💡 TRADING SIGNALS BY STYLE:")
+    summary = result['summary']
+    
+    print("\n🚀 Momentum Trading:")
+    for point in summary.get('momentum_trading', []):
+        print(f"  • {point}")
+        
+    print("\n⚡ Day Trading:")
+    for point in summary.get('day_trading', []):
+        print(f"  • {point}")
+        
+    print("\n📈 Swing Trading:")
+    for point in summary.get('swing_trading', []):
+        print(f"  • {point}")
+    
+    print("\n" + "="*60)

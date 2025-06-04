@@ -167,7 +167,7 @@ class LiquidityAnalysis(BaseTool):
             for pair in pairs:
                 try:
                     price_change = abs(float(pair.get("usdPrice24hrPercentChange", 0)))
-                    if price_change > 1000:  # >1000% price change
+                    if price_change > 1000:
                         final_score = min(final_score, 90)
                         negative_points += 1
                         break
