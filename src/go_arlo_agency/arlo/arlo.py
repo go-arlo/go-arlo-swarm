@@ -89,7 +89,7 @@ class Arlo(Agent):
                         'ticker': input_data.get('ticker'),
                         'address': input_data.get('address'),
                         'chain': input_data.get('chain', 'solana')
-                    }
+                    }           
                     
                     self.request_analysis(
                         agent="Signal",
@@ -204,12 +204,17 @@ class Arlo(Agent):
             }
 
             try:
-                db_output = self.use_tool("DatabaseWriter", {"report_data": report_data})
+                # Convert report_data to a JSON string and then back to a dict to ensure proper formatting
+                report_json = json.dumps(report_data)
+                report_dict = json.loads(report_json)
+                
+                db_output = self.use_tool("DatabaseWriter", {"report_data": report_dict})
                 
                 if not db_output or db_output.get('status') != 'success':
                     raise ValueError(f"Failed to write report to database: {db_output}")
             except Exception as e:
                 print(f"Error writing to database: {str(e)}")
+                raise
             
             return {"report_data": report_data}
 

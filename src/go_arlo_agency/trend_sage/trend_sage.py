@@ -1,5 +1,4 @@
 from agency_swarm import Agent
-from .tools.social_sentiment import SocialSentiment
 from .tools.trend_analysis import TrendAnalysis
 from typing import Dict
 
@@ -7,9 +6,9 @@ class TrendSage(Agent):
     def __init__(self):
         super().__init__(
             name="Trend Sage",
-            description="Social sentiment analyst",
+            description="Social engagement analyst",
             instructions="./instructions.md",
-            tools=[SocialSentiment, TrendAnalysis],
+            tools=[TrendAnalysis],
             temperature=0.5,
             max_prompt_tokens=128000,
             model="gpt-4o"
@@ -22,34 +21,33 @@ class TrendSage(Agent):
                 trend_tool = TrendAnalysis(token_symbol=message)
                 trend_analysis = trend_tool.run()
                 
-                sentiment_tool = SocialSentiment(token_symbol=message)
-                sentiment_analysis = sentiment_tool.run()
-                
-                combined_analysis = self._analyze_trends(sentiment_analysis, trend_analysis)
+                combined_analysis = self._analyze_trends(trend_analysis)
+                metrics = self._extract_metrics(trend_analysis)
+                social_score = self._calculate_social_score(metrics)
                 
                 return {
                     "data": {
-                        "sentiment_score": sentiment_analysis.get("sentiment_score", 0),
                         "assessment": combined_analysis["assessment"],
                         "summary": combined_analysis["summary"],
-                        "key_points": combined_analysis["key_points"]
+                        "key_points": combined_analysis["key_points"],
+                        "social_score": social_score
                     }
                 }
             except Exception as e:
                 print(f"Trend Sage analysis error: {str(e)}")
                 return {
                     "data": {
-                        "sentiment_score": 0,
                         "assessment": "negative",
                         "summary": "Analysis failed",
-                        "key_points": ["Error processing analysis"]
+                        "key_points": ["Error processing analysis"],
+                        "social_score": 0
                     }
                 }
         
         return super().process_message(message, sender)
 
-    def _extract_metrics(self, trend_data: Dict, sentiment_data: Dict) -> Dict:
-        """Extract key metrics from trend and sentiment data"""
+    def _extract_metrics(self, trend_data: Dict) -> Dict:
+        """Extract key metrics from trend data"""
         trend_metrics = trend_data.get("data", {})
         tweet_metrics = trend_metrics.get("tweet_metrics", {})
         influence_distribution = tweet_metrics.get("influence_distribution", {})
@@ -60,15 +58,10 @@ class TrendSage(Agent):
         mid_influence = influence_distribution.get("mid_influence", {}).get("unique_users", 0)
         warning_tweets = tweet_metrics.get("warning_tweets_data", [])
         
-        sentiment_score = sentiment_data.get("sentiment_score", 0)
-        sentiment_summary = sentiment_data.get("sentiment_summary", "")
-        
         return {
             "high_influence": high_influence,
             "mid_influence": mid_influence,
             "warning_tweets": warning_tweets,
-            "sentiment_score": sentiment_score,
-            "sentiment_summary": sentiment_summary,
             "influential_account": influential_account
         }
 
@@ -107,16 +100,6 @@ class TrendSage(Agent):
         if metrics["mid_influence"] < 3:
             negative_points += 1
         
-        if metrics["sentiment_score"] > 0:
-            if metrics["sentiment_score"] >= 70:
-                key_points.append("Strong positive sentiment detected from social volume")
-                positive_points += 1
-            elif metrics["sentiment_score"] >= 60:
-                key_points.append("Neutral sentiment detected from social volume")
-            else:
-                key_points.append("Weak or negative sentiment detected from social volume")
-                negative_points += 1
-        
         return key_points, positive_points, negative_points
 
     def _get_assessment(self, positive_points: int, negative_points: int) -> str:
@@ -133,45 +116,35 @@ class TrendSage(Agent):
         
         influential_account = metrics.get("influential_account", None)
         
-        if metrics["sentiment_score"] > 0:
-            if metrics["high_influence"] > 0:
-                if influential_account and influential_account.get("category") == "high":
-                    screen_name = influential_account.get("screen_name", "")
-                    replies = influential_account.get("replies", 0)
-                    views = influential_account.get("views", 0)
-                    summary_parts.append(f"shows notable high-follower X posts, with @{screen_name}'s post generating {replies} replies and {views} views")
-                else:
-                    summary_parts.append("shows notable recent high-follower X posts")
-            elif metrics["mid_influence"] >= 3:
-                if influential_account and influential_account.get("category") == "mid":
-                    screen_name = influential_account.get("screen_name", "")
-                    replies = influential_account.get("replies", 0)
-                    views = influential_account.get("views", 0)
-                    summary_parts.append(f"shows active engagement through mid-follower X posts, with @{screen_name}'s post generating {replies} replies and {views} views")
-                else:
-                    summary_parts.append("shows recent active engagement through mid-follower X posts")
+        if metrics["high_influence"] > 0:
+            if influential_account and influential_account.get("category") == "high":
+                screen_name = influential_account.get("screen_name", "")
+                replies = influential_account.get("replies", 0)
+                views = influential_account.get("views", 0)
+                summary_parts.append(f"shows notable high-follower X posts, with @{screen_name}'s post generating {replies} replies and {views} views")
             else:
-                summary_parts.append("shows engagement primarily from small accounts")
-            
-            if metrics["sentiment_score"] >= 70:
-                summary_parts.append("showing strong positive sentiment")
-            elif metrics["sentiment_score"] >= 60:
-                summary_parts.append("showing neutral sentiment")
+                summary_parts.append("shows notable recent high-follower X posts")
+        elif metrics["mid_influence"] >= 3:
+            if influential_account and influential_account.get("category") == "mid":
+                screen_name = influential_account.get("screen_name", "")
+                replies = influential_account.get("replies", 0)
+                views = influential_account.get("views", 0)
+                summary_parts.append(f"shows active engagement through mid-follower X posts, with @{screen_name}'s post generating {replies} replies and {views} views")
             else:
-                summary_parts.append("showing weak or negative sentiment")
-            
-            if metrics["warning_tweets"]:
-                summary_parts.append(f"with {len(metrics['warning_tweets'])} warning tweets detected suggesting potential risks")
-            else:
-                summary_parts.append("with no warning tweets detected")
-            
-            return f"Recent social analysis {'. '.join(summary_parts)}."
+                summary_parts.append("shows recent active engagement through mid-follower X posts")
+        else:
+            summary_parts.append("shows engagement primarily from small accounts")
         
-        return ""
-
-    def _analyze_trends(self, sentiment_data: Dict, trend_data: Dict) -> Dict:
-        """Analyze social trends and sentiment data"""
-        metrics = self._extract_metrics(trend_data, sentiment_data)
+        if metrics["warning_tweets"]:
+            summary_parts.append(f"with {len(metrics['warning_tweets'])} warning tweets detected suggesting potential risks")
+        else:
+            summary_parts.append("with no warning tweets detected")
+        
+        return f"Recent social analysis {'. '.join(summary_parts)}."
+        
+    def _analyze_trends(self, trend_data: Dict) -> Dict:
+        """Analyze social trends data"""
+        metrics = self._extract_metrics(trend_data)
         
         key_points, positive_points, negative_points = self._generate_key_points(metrics)
         
@@ -189,3 +162,36 @@ class TrendSage(Agent):
             "assessment": assessment,
             "key_points": key_points[:5]
         }
+
+    def _calculate_social_score(self, metrics: Dict) -> float:
+        """Calculate social engagement score (0-100) based on trend metrics"""
+        score = 40
+        
+        high_influence = metrics.get("high_influence", 0)
+        if high_influence >= 3:
+            score += 30
+        elif high_influence >= 1:
+            score += 20
+        
+        mid_influence = metrics.get("mid_influence", 0)
+        if mid_influence >= 5:
+            score += 20
+        elif mid_influence >= 3:
+            score += 15
+        elif mid_influence >= 1:
+            score += 10
+            
+        warning_tweets = len(metrics.get("warning_tweets", []))
+        if warning_tweets >= 3:
+            score -= 30
+        elif warning_tweets >= 1:
+            score -= 15
+            
+        influential_account = metrics.get("influential_account", None)
+        if influential_account:
+            if influential_account.get("category") == "high":
+                score += 10
+            elif influential_account.get("category") == "mid":
+                score += 5
+                
+        return max(0, min(100, score))

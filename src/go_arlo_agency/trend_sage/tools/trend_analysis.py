@@ -131,17 +131,13 @@ class TrendAnalysis(BaseTool):
                 'views': (views * 0.1) * follower_multiplier
             }
             
-            # Calculate total weighted engagement
             weighted_engagement = sum(engagement_weights.values())
             
-            # Calculate relevancy weight (normalized to 0-1)
             relevancy_weight = min(1.0, weighted_engagement / 5000)
             
-            # Apply negative sentiment multiplier if tweet is negative
             tweet_id = tweet.get('id')
             sentiment_multiplier = -1.5 if tweet_id in negative_ids else 1.0
             
-            # Calculate tweet score with sentiment multiplier
             tweet_score = weighted_engagement * relevancy_weight * sentiment_multiplier
             
             total_score += tweet_score
@@ -308,6 +304,17 @@ class TrendAnalysis(BaseTool):
             
         return None
 
+    def _is_token_mentioned(self, tweet_text):
+        """Check if a tweet mentions the token symbol in any format"""
+        if not isinstance(tweet_text, str):
+            return False
+        tweet_text = tweet_text.lower()
+        return (
+            self.token_symbol.lower() in tweet_text or 
+            f"${self.token_symbol.lower()}" in tweet_text or 
+            f"#{self.token_symbol.lower()}" in tweet_text
+        )
+
     def _analyze_tweets(self, data):
         """Analyze tweets based on user influence categories and warning signals"""
         if not isinstance(data, dict):
@@ -322,9 +329,9 @@ class TrendAnalysis(BaseTool):
 
         print(f"Analyzing {len(all_tweets)} tweets")
         
-        low_influence_users = set()    # < 2000 followers
-        mid_influence_users = set()    # 2000-9999 followers
-        high_influence_users = set()   # >= 10000 followers
+        low_influence_users = set()
+        mid_influence_users = set()
+        high_influence_users = set()
 
         high_influence = []
         mid_influence = []
@@ -342,6 +349,10 @@ class TrendAnalysis(BaseTool):
                 
             screen_name = user.get('screen_name', '')
             view_count = tweet.get('view_count', 0)
+            tweet_text = tweet.get('full_text', '')
+            
+            if not self._is_token_mentioned(tweet_text):
+                continue
             
             if isinstance(view_count, (int, float)) and view_count >= 500:
                 users_with_min_views.add(screen_name)
@@ -356,6 +367,10 @@ class TrendAnalysis(BaseTool):
                 
             follower_count = user.get('followers_count', 0)
             screen_name = user.get('screen_name', '')
+            tweet_text = tweet.get('full_text', '')
+            
+            if not self._is_token_mentioned(tweet_text):
+                continue
             
             has_min_views = screen_name in users_with_min_views
 
@@ -389,37 +404,40 @@ class TrendAnalysis(BaseTool):
             if not isinstance(tweet, dict):
                 continue
                 
-            tweet_text = tweet.get('full_text', '').lower()
+            tweet_text = tweet.get('full_text', '')
             
-            if any(positive in tweet_text for positive in positive_phrases):
+            if not self._is_token_mentioned(tweet_text):
+                continue
+            
+            if any(positive in tweet_text.lower() for positive in positive_phrases):
                 continue
                 
-            has_general_phrase = any(phrase in tweet_text for phrase in general_phrases)
-            mentions_token = self.token_symbol.lower() in tweet_text or f"${self.token_symbol.lower()}" in tweet_text or f"#{self.token_symbol.lower()}" in tweet_text
+            has_general_phrase = any(phrase in tweet_text.lower() for phrase in general_phrases)
             
-            if has_general_phrase and not mentions_token:
+            if has_general_phrase and not self._is_token_mentioned(tweet_text):
                 continue
                 
-            if any(keyword in tweet_text for keyword in negative_keywords):
+            if any(keyword in tweet_text.lower() for keyword in negative_keywords):
                 potential_negative_tweets.append(tweet)
 
         negative_tweets = []
         for tweet in potential_negative_tweets:
-            tweet_text = tweet.get('full_text', '').lower()
+            tweet_text = tweet.get('full_text', '')
             
-            token_mentioned = self.token_symbol.lower() in tweet_text or f"${self.token_symbol.lower()}" in tweet_text
+            if not self._is_token_mentioned(tweet_text):
+                continue
             
-            has_specific_warning = any(term in tweet_text for term in [
+            has_specific_warning = any(term in tweet_text.lower() for term in [
                 'contract', 'vulnerab', 'risk', 'issue', 'security', 'honeypot', 'lock', 
                 'withdraw', 'liquidity', 'sell', 'dump', 'dev wallet', 'team wallet'
             ])
             
-            is_comparison = ('unlike' in tweet_text or 'better than' in tweet_text or 'compared to' in tweet_text)
+            is_comparison = ('unlike' in tweet_text.lower() or 'better than' in tweet_text.lower() or 'compared to' in tweet_text.lower())
             
-            if token_mentioned and has_specific_warning and not is_comparison:
+            if self._is_token_mentioned(tweet_text) and has_specific_warning and not is_comparison:
                 negative_tweets.append(tweet)
                 
-            elif token_mentioned and any(strong_term in tweet_text for strong_term in ['confirmed scam', 'proven rug', '100% fake']):
+            elif self._is_token_mentioned(tweet_text) and any(strong_term in tweet_text.lower() for strong_term in ['confirmed scam', 'proven rug', '100% fake']):
                 negative_tweets.append(tweet)
 
         warning_tweets_data = [
@@ -589,4 +607,3 @@ if __name__ == "__main__":
     )
     result = tool.run()
     print(result) 
-    
