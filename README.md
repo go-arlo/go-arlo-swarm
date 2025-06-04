@@ -1,12 +1,11 @@
 # Go Arlo Agents
 
-A powerful token analysis platform that combines multiple AI agents to provide comprehensive token analysis, market insights, and social sentiment analysis.
+A powerful risk management tool that combines multiple AI agents to provide comprehensive token analysis, market insights, and social sentiment analysis.
 
 ## Prerequisites
 
 - Python 3.11+
 - PostgreSQL 12+
-- API keys (see below)
 
 ## Required API Keys
 
@@ -24,15 +23,11 @@ You'll need the following API keys to run the application:
    - Required for market data and token information
    - Get it from: https://birdeye.so/developers
 
-4. **LunarCrush API Key**
-   - Required for social sentiment analysis
-   - Get it from: https://lunarcrush.com/developers
-
-5. **TweetScout API Key**
+4. **TweetScout API Key**
    - Required for Twitter analysis
    - Get it from: https://tweetscout.io
 
-6. **Twitter API Keys**
+5. **Twitter API Keys**
    - Required for posting analysis replies on Twitter
    - Get them from: https://developer.twitter.com/en/portal/dashboard
    - You'll need:
@@ -41,7 +36,7 @@ You'll need the following API keys to run the application:
      - Access Token
      - Access Token Secret
 
-7. **Telegram Bot Token**
+6. **Telegram Bot Token**
    - Required for Telegram integration
    - Get it from: @BotFather on Telegram
 
