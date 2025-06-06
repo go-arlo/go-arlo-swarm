@@ -257,7 +257,7 @@ def process_analysis_queue():
                             continue
 
                     if should_analyze:
-                        query = f"token_ticker={job['ticker']}, contract_address={job['address']}, chain={job['chain']}"
+                        query = f"{job['ticker']}, {job['address']}, {job['chain']}"
                         response = handle_message(query)
                         print(f"Analysis complete for {job['address']}")
                         
@@ -515,7 +515,7 @@ async def analyze_token(
 def run_analysis(ticker, address, chain):
     """Run the analysis without blocking the event loop."""
     try:
-        query = f"token_ticker={ticker}, contract_address={address}, chain={chain}"
+        query = f"{ticker}, {address}, {chain}"
         print(f"Query: {query}")
         print(f"Starting analysis for {address}")
 

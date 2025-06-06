@@ -407,7 +407,7 @@
             {
                 "function": {
                     "name": "BundleDetector",
-                    "description": "Tool for detecting coordinated buying patterns - OPTIMIZED VERSION",
+                    "description": "Tool for detecting coordinated buying patterns",
                     "parameters": {
                         "properties": {
                             "name": {
@@ -416,7 +416,7 @@
                                 "type": "string"
                             },
                             "description": {
-                                "default": "Analyzes transactions to detect potential bundled trades (Fast Version)",
+                                "default": "Analyzes transactions to detect potential bundled trades",
                                 "title": "Description",
                                 "type": "string"
                             },
