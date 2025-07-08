@@ -1,7 +1,7 @@
 import os
 import requests
 from dotenv import load_dotenv
-from typing import Dict, Any
+from typing import Dict, Any, Union
 import json
 
 load_dotenv()
@@ -23,10 +23,32 @@ class BirdeyeMarketData:
             "Accept": "application/json"
         }
 
+    def safe_float(self, value: Union[str, int, float, None], default: float = 0.0) -> float:
+        """
+        Safely convert a value to float, handling None and invalid values.
+        
+        Args:
+            value: The value to convert to float
+            default: Default value to return if conversion fails
+            
+        Returns:
+            float: The converted value or default
+        """
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
     def format_volume(self, volume: float) -> str:
         """
         Format volume to use M for millions and B for billions.
         """
+        # Ensure volume is a valid number
+        if volume is None or volume < 0:
+            volume = 0.0
+            
         if volume >= 1_000_000_000:
             formatted = volume / 1_000_000_000
             return f"${formatted:.2f}B".rstrip('0').rstrip('.')
@@ -41,6 +63,9 @@ class BirdeyeMarketData:
 
     def format_percentage(self, value: float) -> str:
         """Format percentage with % symbol"""
+        # Ensure value is a valid number
+        if value is None:
+            value = 0.0
         return f"{value:.2f}%"
 
     def get_market_data(self, address: str) -> Dict[str, Any]:
@@ -84,11 +109,11 @@ class BirdeyeMarketData:
                 "success": True,
                 "data": {
                     "address": token_data.get("address", ""),
-                    "price": token_data.get("price", 0),
-                    "liquidity": token_data.get("liquidity", 0),
-                    "supply": token_data.get("total_supply", 0),
-                    "marketcap": token_data.get("market_cap", 0),
-                    "circulating_supply": token_data.get("circulating_supply", 0)
+                    "price": self.safe_float(token_data.get("price"), 0),
+                    "liquidity": self.safe_float(token_data.get("liquidity"), 0),
+                    "supply": self.safe_float(token_data.get("total_supply"), 0),
+                    "marketcap": self.safe_float(token_data.get("market_cap"), 0),
+                    "circulating_supply": self.safe_float(token_data.get("circulating_supply"), 0)
                 }
             }
             
@@ -131,8 +156,9 @@ class BirdeyeMarketData:
             
             data = response.json().get("data", {})
             
-            volume_24h = float(data.get("volume_24h_usd", 0))
-            price_change = float(data.get("price_change_1h_percent", 0))
+            # Use safe_float to handle None values
+            volume_24h = self.safe_float(data.get("volume_24h_usd"), 0)
+            price_change = self.safe_float(data.get("price_change_1h_percent"), 0)
             
             return {
                 "success": True,
@@ -153,7 +179,7 @@ class BirdeyeMarketData:
 
 if __name__ == "__main__":
     birdeye = BirdeyeMarketData()
-    test_address = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    test_address = "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL"
     
     print("\nFetching market data...")
     market_result = birdeye.get_market_data(test_address)
