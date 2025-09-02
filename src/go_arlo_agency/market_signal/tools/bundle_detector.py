@@ -40,7 +40,6 @@ class BundleDetector(BaseTool):
     )
     
     def _detect_chain(self, address: str) -> str:
-        """Auto-detect chain based on address format"""
         if address.startswith("0x"):
             return "base"
         else:
@@ -328,7 +327,7 @@ class BundleDetector(BaseTool):
                     if len(unique_wallets) >= 3:  # At least 3 unique wallets
                         total_tokens = float(tx_df['token_amount'].sum())
                         
-                        if total_tokens > 0:  # Only count if we actually got tokens
+                        if total_tokens > 0:
                             block_trades = [{
                                 'timestamp': str(trade['timestamp']),
                                 'token_amount': float(trade['token_amount']),

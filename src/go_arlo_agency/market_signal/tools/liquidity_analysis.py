@@ -142,7 +142,6 @@ class LiquidityAnalysis(BaseTool):
         return data
 
     def _get_exit_liquidity_data(self, chain: str):
-        """Fetch token exit liquidity data from Birdeye API"""
         endpoint = f"{BASE_URL}/defi/v3/token/exit-liquidity"
 
         headers = {
@@ -178,11 +177,10 @@ class LiquidityAnalysis(BaseTool):
         if chain == "base":
             source = pair.get("source", "")
             if source:
-                return f"DEX-{source[:6]}..."  # Abbreviated address
+                return f"DEX-{source[:6]}..."
             else:
                 return "Unknown DEX"
         else:
-            # For Solana, source is the exchange name
             return pair.get("source", "Unknown")
 
     def _calculate_health_score(self, data, chain: str, exit_data=None):
@@ -255,7 +253,6 @@ class LiquidityAnalysis(BaseTool):
                 exit_info = (exit_data or {}).get('data', {})
                 exit_liquidity_value = self._safe_float(exit_info.get('exit_liquidity', 0))
 
-                # Exit liquidity contribution based on absolute values
                 if exit_liquidity_value > 1_000_000:
                     final_score += 15
                     positive_points += 1

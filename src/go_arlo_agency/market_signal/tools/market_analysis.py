@@ -556,7 +556,6 @@ class MarketAnalysis(BaseTool):
         """Calculate VWAP and related metrics with reasonable bounds"""
         try:
             def safe_float(value, default=0.0):
-                """Safely convert value to float"""
                 if value is None:
                     return default
                 try:

@@ -1011,12 +1011,12 @@ async def get_token_analytics_endpoint(
         description="The contract address to get analytics for",
         min_length=1
     ),
-    chain: Optional[str] = Query(default=None, description="The blockchain network (will auto-detect if not provided)"),
+    chain: Optional[str] = Query(default=None, description="The blockchain network"),
     api_key: str = Depends(verify_api_key)
 ):
     """
     Get token analytics including volume, liquidity, and valuation from Moralis
-    Supports both Solana and Base chains with automatic chain detection
+    Supports both Solana and Base chains
     """
     try:
         # Auto-detect chain if not provided
