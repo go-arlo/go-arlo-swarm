@@ -6,9 +6,16 @@ import json
 
 load_dotenv()
 
+def detect_chain(address: str) -> str:
+    """Auto-detect chain based on address format"""
+    if address.startswith("0x"):
+        return "base"
+    else:
+        return "solana"
+
 class BirdeyeMarketData:
     """
-    Class to handle Birdeye Market Data API requests.
+    Class to handle Birdeye Market Data API requests for both Solana and Base chains.
     Documentation: https://docs.birdeye.so/reference/get_defi-v3-token-market-data
     """
 
@@ -18,7 +25,7 @@ class BirdeyeMarketData:
             raise ValueError("BIRDEYE_API_KEY not found in environment variables")
         
         self.base_url = "https://public-api.birdeye.so"
-        self.headers = {
+        self.base_headers = {
             "X-API-KEY": self.api_key,
             "Accept": "application/json"
         }
@@ -70,7 +77,7 @@ class BirdeyeMarketData:
 
     def get_market_data(self, address: str) -> Dict[str, Any]:
         """
-        Get market data for a specific token address.
+        Get market data for a specific token address (supports both Solana and Base chains).
         
         Args:
             address (str): The token's contract address
@@ -85,15 +92,23 @@ class BirdeyeMarketData:
                 - circulating_supply: circulating supply
         """
         try:
+            chain = detect_chain(address)
+            
+            headers = {
+                **self.base_headers,
+                "x-chain": chain
+            }
+            
             response = requests.get(
                 f"{self.base_url}/defi/v3/token/market-data",
-                headers=self.headers,
+                headers=headers,
                 params={"address": address}
             )
             
             if response.status_code != 200:
-                error_msg = f"Birdeye API returned status code {response.status_code}"
+                error_msg = f"Birdeye API returned status code {response.status_code} for {chain} chain"
                 print(f"Error: {error_msg}")
+                print(f"Response: {response.text}")
                 return {
                     "success": False,
                     "error": error_msg,
@@ -101,7 +116,7 @@ class BirdeyeMarketData:
                 }
             
             data = response.json()
-            print(f"Raw Birdeye API response: {json.dumps(data, indent=2)}")
+            print(f"Raw Birdeye API response for {chain} chain: {json.dumps(data, indent=2)}")
             
             token_data = data.get("data", {})
             
@@ -113,7 +128,8 @@ class BirdeyeMarketData:
                     "liquidity": self.safe_float(token_data.get("liquidity"), 0),
                     "supply": self.safe_float(token_data.get("total_supply"), 0),
                     "marketcap": self.safe_float(token_data.get("market_cap"), 0),
-                    "circulating_supply": self.safe_float(token_data.get("circulating_supply"), 0)
+                    "circulating_supply": self.safe_float(token_data.get("circulating_supply"), 0),
+                    "chain": chain
                 }
             }
             
@@ -128,7 +144,7 @@ class BirdeyeMarketData:
 
     def get_trade_data(self, address: str) -> Dict[str, Any]:
         """
-        Get trade data for a specific token address.
+        Get trade data for a specific token address (supports both Solana and Base chains).
         
         Args:
             address (str): The token's contract address
@@ -139,15 +155,23 @@ class BirdeyeMarketData:
                 - price_change_1h: formatted hourly price change (as percentage)
         """
         try:
+            chain = detect_chain(address)
+            
+            headers = {
+                **self.base_headers,
+                "x-chain": chain
+            }
+            
             response = requests.get(
                 f"{self.base_url}/defi/v3/token/trade-data/single",
-                headers=self.headers,
+                headers=headers,
                 params={"address": address}
             )
             
             if response.status_code != 200:
-                error_msg = f"Birdeye API returned status code {response.status_code}"
+                error_msg = f"Birdeye API returned status code {response.status_code} for {chain} chain"
                 print(f"Error: {error_msg}")
+                print(f"Response: {response.text}")
                 return {
                     "success": False,
                     "error": error_msg,
@@ -164,7 +188,8 @@ class BirdeyeMarketData:
                 "success": True,
                 "data": {
                     "volume_24h": self.format_volume(volume_24h),
-                    "price_change_1h": self.format_percentage(price_change)
+                    "price_change_1h": self.format_percentage(price_change),
+                    "chain": chain
                 }
             }
             
