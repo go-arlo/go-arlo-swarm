@@ -27,6 +27,13 @@ import token_analytics
 
 load_dotenv()
 
+def detect_chain(address: str) -> str:
+    """Auto-detect chain based on address format"""
+    if address.startswith("0x"):
+        return "base"
+    else:
+        return "solana"
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from go_arlo_agency.database.db import get_analysis, save_token, get_token, get_all_tokens, get_all_analyses
@@ -177,7 +184,7 @@ def get_formatted_analysis(address: str):
             return None
             
         ticker = analysis.get("token_ticker", "").upper()
-        chain = analysis.get("chain", "solana")
+        chain = analysis.get("chain", detect_chain(address))
         
         return format_analysis_tweet(analysis, ticker, chain)
     except Exception as e:
@@ -336,15 +343,22 @@ configure_cors(app)
 class AnalysisRequest(BaseModel):
     ticker: str
     address: str
-    chain: Optional[str] = "solana"
+    chain: Optional[str] = None
 
     class Config:
         json_schema_extra = {
-            "example": {
-                "ticker": "GOAT",
-                "address": "CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump",
-                "chain": "solana"
-            }
+            "example": [
+                {
+                    "ticker": "GOAT", 
+                    "address": "CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump",
+                    "chain": "solana"
+                },
+                {
+                    "ticker": "BASED",
+                    "address": "0x1234567890123456789012345678901234567890",
+                    "chain": "base"
+                }
+            ]
         }
 
 class ConnectionManager:
@@ -997,13 +1011,18 @@ async def get_token_analytics_endpoint(
         description="The contract address to get analytics for",
         min_length=1
     ),
-    chain: str = Query(default="solana", description="The blockchain network"),
+    chain: Optional[str] = Query(default=None, description="The blockchain network"),
     api_key: str = Depends(verify_api_key)
 ):
     """
     Get token analytics including volume, liquidity, and valuation from Moralis
+    Supports both Solana and Base chains
     """
     try:
+        # Auto-detect chain if not provided
+        if not chain:
+            chain = detect_chain(contract_address)
+            
         result = token_analytics.get_token_analytics(contract_address, chain)
         return result
     except Exception as e:
@@ -1023,11 +1042,14 @@ async def get_token_metadata(
 ):
     """
     Get token metadata from Birdeye API including logo URI and social links
+    Supports both Solana and Base chains with automatic chain detection
     """
     try:
+        chain = detect_chain(contract_address)
+        
         headers = {
             "accept": "application/json",
-            "x-chain": "solana",
+            "x-chain": chain,
             "X-API-KEY": os.getenv('BIRDEYE_API_KEY')
         }
         
@@ -1133,6 +1155,7 @@ async def get_token_overview(
 ):
     """
     Get comprehensive token overview data from Birdeye API including price, volume, liquidity, and unique wallet stats
+    Supports both Solana and Base chains with automatic chain detection
     """
     try:
         birdeye_api_key = os.getenv('BIRDEYE_API_KEY')
@@ -1141,10 +1164,12 @@ async def get_token_overview(
                 status_code=500,
                 detail="Birdeye API key not configured"
             )
+        
+        chain = detect_chain(contract_address)
             
         headers = {
             "accept": "application/json",
-            "x-chain": "solana",
+            "x-chain": chain,
             "X-API-KEY": birdeye_api_key
         }
         

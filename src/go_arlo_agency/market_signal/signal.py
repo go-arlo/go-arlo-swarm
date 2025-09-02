@@ -7,12 +7,12 @@ class Signal(Agent):
     def __init__(self):
         super().__init__(
             name="Signal",
-            description="Market and liquidity metrics analyst",
+            description="Market and liquidity metrics analyst supporting both Solana and Base chains",
             instructions="./instructions.md",
             tools=[MarketAnalysis, LiquidityAnalysis, BundleDetector],
             temperature=0.5,
             max_prompt_tokens=128000,
-            model="gpt-4o"
+            model="gpt-4.1"
         )
 
     def process_message(self, message, sender):
@@ -52,20 +52,30 @@ class Signal(Agent):
     def _combine_analysis(self, bundle_analysis, market_analysis, liquidity_analysis):
         """Combine all analysis results considering bundle context"""
         
-        market_score = market_analysis.get("market_score", {}).get("score", 0)
-        liquidity_score = liquidity_analysis.get("liquidity_score", 0)
+        bundle_supported = bundle_analysis.get("supported") != False
+        detected_chain = market_analysis.get("chain", "unknown") if market_analysis.get("success") else "unknown"
         
-        has_bundles = bundle_analysis.get("has_bundled_trades", False)
-        bundle_details = bundle_analysis.get("details", "")
-        bundle_risk = self._extract_risk_level(bundle_details)
-        bundle_percentage = self._extract_bundle_percentage(bundle_details)
+        # Get base metrics
+        market_score = market_analysis.get("market_score", {}).get("score", 0)
+        liquidity_score = liquidity_analysis.get("health_score", 0)
+        
+        if bundle_supported:
+            has_bundles = bundle_analysis.get("has_bundled_trades", False)
+            bundle_details = bundle_analysis.get("details", "")
+            bundle_risk = self._extract_risk_level(bundle_details)
+            bundle_percentage = self._extract_bundle_percentage(bundle_details)
+        else:
+            has_bundles = False
+            bundle_details = bundle_analysis.get("details", "Bundle analysis not supported")
+            bundle_risk = "LOW" 
+            bundle_percentage = 0.0
         
         final_score = self._calculate_final_score(
             market_score,
             liquidity_score,
-            bundle_risk,
+            bundle_risk if bundle_supported else "LOW",
             liquidity_analysis,
-            bundle_analysis
+            bundle_analysis if bundle_supported else None
         )
         
         market_points = market_analysis.get('market_score', {})
@@ -82,10 +92,11 @@ class Signal(Agent):
         
         findings = []
         
-        if has_bundles and bundle_percentage >= 1.0:
-            findings.append(f"Top 5 bundles on launch date totaled {bundle_percentage:.1f}% of supply - {bundle_risk}")
-        else:
-            findings.append("Not a significant amount of bundles detected on launch date.")
+        if bundle_supported:
+            if has_bundles and bundle_percentage >= 1.0:
+                findings.append(f"Top 5 bundles on launch date totaled {bundle_percentage:.1f}% of supply - {bundle_risk}")
+            else:
+                findings.append("Not a significant amount of bundles detected on launch date.")
         
         momentum_finding = self._get_momentum_finding(market_analysis)
         day_trading_finding = self._get_day_trading_finding(market_analysis)
@@ -93,27 +104,33 @@ class Signal(Agent):
         
         findings.extend([momentum_finding, day_trading_finding, swing_trading_finding])
         
-        liquidity_finding = self._get_liquidity_finding(liquidity_analysis)
-        findings.append(liquidity_finding)
+        liquidity_findings = self._get_liquidity_findings(liquidity_analysis)
+        findings.extend(liquidity_findings)
         
         assessment = self._get_assessment(
             total_positive,
             total_negative,
             findings,
-            final_score
+            final_score,
+            bundle_supported
         )
         
-        bundle_summary = self._get_bundle_summary(bundle_analysis, liquidity_analysis)
+        bundle_summary = self._get_bundle_summary(bundle_analysis, liquidity_analysis, bundle_supported)
         trading_summary = self._get_trading_styles_summary(market_analysis)
         
-        combined_summary = f"{bundle_summary}\n\n{trading_summary}"
+        if bundle_summary:
+            combined_summary = f"{bundle_summary}\n\n{trading_summary}"
+        else:
+            combined_summary = trading_summary
         
         return {
             "data": {
                 "market_score": final_score,
                 "assessment": assessment,
                 "summary": combined_summary,
-                "key_points": findings
+                "key_points": findings,
+                "chain": detected_chain,
+                "bundle_supported": bundle_supported
             }
         }
     
@@ -154,8 +171,11 @@ class Signal(Agent):
         
         return final_score
     
-    def _get_bundle_summary(self, bundle_analysis, liquidity_analysis) -> str:
+    def _get_bundle_summary(self, bundle_analysis, liquidity_analysis, bundle_supported: bool) -> str:
         """Create bundle summary with liquidity context"""
+        if not bundle_supported:
+            return ""
+            
         if not bundle_analysis.get("has_bundled_trades"):
             return "No suspicious bundle trading patterns detected."
             
@@ -192,7 +212,7 @@ class Signal(Agent):
         except (ValueError, IndexError):
             return 0.0
 
-    def _get_assessment(self, positive_points: int, negative_points: int, key_findings: list, final_score: float) -> str:
+    def _get_assessment(self, positive_points: int, negative_points: int, key_findings: list, final_score: float, bundle_supported: bool) -> str:
         """Determine assessment based on positive vs negative points"""
         critical_negative_signals = [
             "CONSIDERABLE RISK", "HIGH RISK", "VERY HIGH RISK",
@@ -204,7 +224,9 @@ class Signal(Agent):
             "momentum conflict", "pullback likely", "mean reversion", "above vwap"
         ]
         
-        has_high_bundle_risk = any("HIGH RISK" in finding or "VERY HIGH RISK" in finding for finding in key_findings)
+        has_high_bundle_risk = False
+        if bundle_supported:
+            has_high_bundle_risk = any("HIGH RISK" in finding or "VERY HIGH RISK" in finding for finding in key_findings)
         
         if final_score < 65:
             return "negative"
@@ -217,7 +239,7 @@ class Signal(Agent):
                     negative_count += 1
                     break
         
-        if has_high_bundle_risk:
+        if bundle_supported and has_high_bundle_risk:
             if final_score < 75:
                 return "negative"
             else:
@@ -302,18 +324,33 @@ class Signal(Agent):
         else:
             return f"Swing Trading: {ema_signal.title()} trend with {atr_percent:.1f}% volatility"
 
-    def _get_liquidity_finding(self, liquidity_analysis) -> str:
-        """Extract liquidity key finding"""
+    def _get_liquidity_findings(self, liquidity_analysis) -> list:
+        """Extract liquidity key findings with separate exit liquidity for Base tokens"""
+        findings = []
+        
+        key_metrics = liquidity_analysis.get('key_metrics', [])
+        exit_liquidity_metric = None
+        
+        for metric in key_metrics:
+            if metric.startswith('Exit liquidity:'):
+                exit_liquidity_metric = metric
+                break
+        
         price_impact = liquidity_analysis.get('average_price_impact', 0)
         
         if price_impact < 0.01:
-            return "Strong liquidity with minimal price impact indicating exceptional depth"
+            findings.append("Liquidity: Minimal price impact indicating exceptional depth")
         elif price_impact < 1.0:
-            return f"Strong liquidity with low average price impact of {price_impact:.2f}%"
+            findings.append(f"Liquidity: Low average price impact of {price_impact:.2f}% indicates strong liquidity")
         elif price_impact < 3.0:
-            return f"Moderate liquidity with average price impact of {price_impact:.2f}%"
+            findings.append(f"Liquidity: Moderate average price impact of {price_impact:.2f}%")
         else:
-            return f"Limited liquidity with high average price impact of {price_impact:.2f}%"
+            findings.append(f"Liquidity: High average price impact of {price_impact:.2f}% indicates limited liquidity")
+        
+        if exit_liquidity_metric:
+            findings.append(exit_liquidity_metric)
+        
+        return findings
 
     def _get_trading_styles_summary(self, market_analysis) -> str:
         """Create comprehensive summary explaining trading style indicators"""

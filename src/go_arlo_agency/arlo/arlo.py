@@ -11,12 +11,12 @@ class Arlo(Agent):
     def __init__(self):
         super().__init__(
             name="Arlo",
-            description="Lead coordinator for Team Arlo",
+            description="Lead coordinator for Team Arlo supporting both Solana and Base chain tokens",
             instructions="./instructions.md",
             tools=[CalculateWeightedScore, DatabaseWriter, TokenControl, Summary],
             temperature=0.5,
             max_prompt_tokens=128000,
-            model="gpt-4o"
+            model="gpt-4.1"
         )
         self.collected_reports = {}
         self.current_input = {}
@@ -80,16 +80,23 @@ class Arlo(Agent):
                             input_data = {
                                 'ticker': parts[0],
                                 'address': parts[1],
-                                'chain': parts[2] if len(parts) > 2 else 'solana'
+                                'chain': parts[2] if len(parts) > 2 else None
                             }
                         else:
                             return "Error: Invalid input format. Please use either JSON format or comma-separated values (ticker, address, chain)"
 
+                    address = input_data.get('address')
+                    if not address:
+                        return "Error: Token address is required"
+                    
+                    detected_chain = input_data.get('chain') or self._detect_chain(address)
+                    print(f"Processing token on {detected_chain} chain: {address}")
+
                     self.current_input = {
                         'ticker': input_data.get('ticker'),
-                        'address': input_data.get('address'),
-                        'chain': input_data.get('chain', 'solana')
-                    }           
+                        'address': address,
+                        'chain': detected_chain
+                    }
                     
                     self.request_analysis(
                         agent="Signal",
@@ -194,7 +201,7 @@ class Arlo(Agent):
                 "final_score": float(final_score),
                 "token_ticker": self.current_input['ticker'],
                 "contract_address": self.current_input['address'],
-                "chain": self.current_input.get('chain', 'solana'),
+                "chain": self.current_input['chain'],
                 "timestamp": datetime.now(UTC).isoformat(),
                 "token_safety": control_info['token_safety'],
                 "market_position": market_position,
@@ -262,3 +269,9 @@ class Arlo(Agent):
             return "neutral"
         else:
             return "negative"
+
+    def _detect_chain(self, address: str) -> str:
+        if address.startswith("0x"):
+            return "base"
+        else:
+            return "solana"

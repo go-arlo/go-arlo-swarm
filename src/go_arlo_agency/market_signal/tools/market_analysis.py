@@ -14,32 +14,49 @@ OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv"
 
 class MarketAnalysis(BaseTool):
     """
-    Enhanced market analysis tool providing volume, liquidity and technical indicators
+    Enhanced market analysis tool providing volume, liquidity and technical indicators.
+    Supports both Solana and Base chains with automatic detection.
     """
 
     address: str = Field(..., description="The token address to analyze")
+    chain: str = Field(default="auto", description="The blockchain network (auto-detect, solana, or base)")
     trade_data: dict = Field(default_factory=dict, description="Stores trade data from API")
+
+    def _detect_chain(self, address: str) -> str:
+        """Auto-detect chain based on address format"""
+        if address.startswith("0x"):
+            return "base"
+        else:
+            return "solana"
 
     def run(self):
         """
         Executes comprehensive market analysis including volume, liquidity and technical indicators
         """
         try:
-            print(f"\nAttempting to fetch trade data for address: {self.address}")
-            self.trade_data = self._get_trade_data()
+            if self.chain == "auto":
+                detected_chain = self._detect_chain(self.address)
+                print(f"Auto-detected chain: {detected_chain} for address: {self.address}")
+            else:
+                detected_chain = self.chain
+            
+            print(f"\nAttempting to fetch trade data for address: {self.address} on {detected_chain}")
+            self.trade_data = self._get_trade_data(detected_chain)
             print(f"Trade data response: {self.trade_data}")
             
-            print("\nAttempting to fetch OHLCV data...")
-            ohlcv_data = self._get_ohlcv_data()
+            print(f"\nAttempting to fetch OHLCV data for {detected_chain}...")
+            ohlcv_data = self._get_ohlcv_data(detected_chain)
             print(f"OHLCV data response: {ohlcv_data}")
             
             df = self._prepare_ohlcv_dataframe(ohlcv_data)
             
             technical_analysis = self._calculate_technical_indicators(df)
-            market_metrics = self._calculate_market_metrics(self.trade_data)
+            market_metrics = self._calculate_market_metrics(self.trade_data, detected_chain)
             market_score = self._calculate_market_score(market_metrics, technical_analysis)
             
             return {
+                "success": True,
+                "chain": detected_chain,
                 "market_metrics": market_metrics,
                 "technical_analysis": technical_analysis,
                 "market_score": market_score,
@@ -49,6 +66,8 @@ class MarketAnalysis(BaseTool):
         except Exception as e:
             print(f"\nError details: {str(e)}")
             return {
+                "success": False,
+                "chain": detected_chain if 'detected_chain' in locals() else "unknown",
                 "error": f"Analysis failed: {str(e)}",
                 "market_metrics": {
                     "volume_metrics": {"volume_24h": 0, "volume_change_24h": 0, "buy_volume_ratio": 0, "unique_wallets_24h": 0},
@@ -68,23 +87,29 @@ class MarketAnalysis(BaseTool):
                 }
             }
 
-    def _get_trade_data(self):
+    def _get_trade_data(self, chain: str):
         """Fetch trade data from Birdeye API"""
-        headers = {"X-API-KEY": BIRDEYE_API_KEY}
+        headers = {
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": chain
+        }
         params = {"address": self.address}
         
         response = requests.get(TRADE_DATA_URL, headers=headers, params=params)
         if response.status_code != 200:
-            raise Exception(f"Trade data API error: {response.status_code}")
+            raise Exception(f"Trade data API error for {chain} chain: {response.status_code} - {response.text}")
             
         return response.json().get('data', {})
 
-    def _get_ohlcv_data(self):
+    def _get_ohlcv_data(self, chain: str):
         """Fetch OHLCV data from Birdeye API"""
         current_time = int(datetime.now().timestamp())
         time_from = current_time - (4 * 60 * 60)  # 4 hours ago
         
-        headers = {"X-API-KEY": BIRDEYE_API_KEY}
+        headers = {
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": chain
+        }
         params = {
             "address": self.address,
             "type": "5m",
@@ -94,7 +119,7 @@ class MarketAnalysis(BaseTool):
         
         response = requests.get(OHLCV_URL, headers=headers, params=params)
         if response.status_code != 200:
-            raise Exception(f"OHLCV API error: {response.status_code}")
+            raise Exception(f"OHLCV API error for {chain} chain: {response.status_code} - {response.text}")
             
         return response.json().get('data', {}).get('items', [])
 
@@ -154,7 +179,6 @@ class MarketAnalysis(BaseTool):
         """Calculate momentum trading indicators: RSI, Stochastic, Bollinger Bands"""
         df = df.copy()
         
-        # RSI (14-period)
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -205,7 +229,6 @@ class MarketAnalysis(BaseTool):
         """Calculate day trading indicators: VWAP, Volume indicators"""
         latest = df.iloc[-1]
         
-        # On-Balance Volume (OBV)
         df = df.copy()
         df.loc[df.index[0], 'obv'] = 0
         
@@ -222,7 +245,6 @@ class MarketAnalysis(BaseTool):
             else:
                 df.loc[df.index[i], 'obv'] = prev_obv
         
-        # Chaikin Money Flow (CMF) - 20 period
         high_low_diff = df['h'] - df['l']
         high_low_diff = high_low_diff.replace(0, 0.0001)
         df['mf_multiplier'] = ((df['c'] - df['l']) - (df['h'] - df['c'])) / high_low_diff
@@ -320,34 +342,59 @@ class MarketAnalysis(BaseTool):
             "recent_low": recent_low
         }
 
-    def _calculate_market_metrics(self, trade_data):
+    def _calculate_market_metrics(self, trade_data, chain: str):
         """Calculate comprehensive market metrics with None value handling"""
         try:
             def safe_float(value, default=0.0):
+                """Safely convert value to float"""
+                if value is None:
+                    return default
                 try:
-                    return float(value) if value is not None else default
+                    return float(value)
+                except (ValueError, TypeError):
+                    return default
+            
+            def safe_int(value, default=0):
+                """Safely convert value to int"""
+                if value is None:
+                    return default
+                try:
+                    return int(value)
                 except (ValueError, TypeError):
                     return default
 
             volume_24h = safe_float(trade_data.get('volume_24h_usd'))
             volume_buy_24h = safe_float(trade_data.get('volume_buy_24h_usd'))
+            price_change_24h = safe_float(trade_data.get('price_change_24h_percent'))
+            price_change_1h = safe_float(trade_data.get('price_change_1h_percent'))
+            volume_change_24h = safe_float(trade_data.get('volume_24h_change_percent'))
+            trade_24h = safe_int(trade_data.get('trade_24h'))
+            buy_24h = safe_int(trade_data.get('buy_24h'))
+            sell_24h = safe_int(trade_data.get('sell_24h'))
+            unique_wallets_24h = safe_int(trade_data.get('unique_wallet_24h'))
+            
+            if chain == "base":
+                holder_count = safe_int(trade_data.get('holder'))
+                print(f"ℹ️  Base chain: {unique_wallets_24h:,} unique wallets (24h), {holder_count:,} total holders")
+            else:
+                print(f"ℹ️  Solana chain: {unique_wallets_24h:,} unique wallets (24h)")
             
             return {
                 "volume_metrics": {
                     "volume_24h": volume_24h,
-                    "volume_change_24h": safe_float(trade_data.get('volume_24h_change_percent')),
+                    "volume_change_24h": volume_change_24h,
                     "buy_volume_ratio": volume_buy_24h / volume_24h if volume_24h > 0 else 0.0,
-                    "unique_wallets_24h": int(trade_data.get('unique_wallet_24h', 0))
+                    "unique_wallets_24h": unique_wallets_24h
                 },
                 "price_metrics": {
                     "price": safe_float(trade_data.get('price')),
-                    "price_change_24h": safe_float(trade_data.get('price_change_24h_percent')),
-                    "price_change_1h": safe_float(trade_data.get('price_change_1h_percent'))
+                    "price_change_24h": price_change_24h,
+                    "price_change_1h": price_change_1h
                 },
                 "trading_metrics": {
-                    "total_trades_24h": int(trade_data.get('trade_24h', 0)),
-                    "buy_count_24h": int(trade_data.get('buy_24h', 0)),
-                    "sell_count_24h": int(trade_data.get('sell_24h', 0))
+                    "total_trades_24h": trade_24h,
+                    "buy_count_24h": buy_24h,
+                    "sell_count_24h": sell_24h
                 }
             }
         except Exception as e:
@@ -508,8 +555,16 @@ class MarketAnalysis(BaseTool):
     def _calculate_vwap_metrics(self, trade_data):
         """Calculate VWAP and related metrics with reasonable bounds"""
         try:
-            current_price = float(trade_data.get('price', 0))
-            vwap = float(trade_data.get('vwap', 0))
+            def safe_float(value, default=0.0):
+                if value is None:
+                    return default
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return default
+            
+            current_price = safe_float(trade_data.get('price'))
+            vwap = safe_float(trade_data.get('vwap'))
             
             if current_price == 0 or vwap == 0:
                 return {
@@ -617,64 +672,182 @@ class MarketAnalysis(BaseTool):
         return summary
 
 if __name__ == "__main__":
-    tool = MarketAnalysis(
-        address="288k7P6sZA7cHGPATbKBHjqgditapKkVXjkAXKH3pump"
-    )
+    import json
+    from datetime import datetime
+    
+    def print_separator(title):
+        print("\n" + "="*80)
+        print(f"🔍 {title}")
+        print("="*80)
+    
+    def print_result(token_name, address, expected_chain, result):
+        print(f"\n📋 {token_name}")
+        print(f"Address: {address}")
+        print(f"Expected Chain: {expected_chain}")
+        print(f"Detected Chain: {result.get('chain', 'unknown')}")
+        
+        if result.get('success'):
+            print(f"✅ SUCCESS")
+            print(f"Market Score: {result['market_score']['score']}/100")
+            
+            market_metrics = result['market_metrics']
+            print(f"Price: ${market_metrics['price_metrics']['price']:.6f}")
+            print(f"Volume 24h: ${market_metrics['volume_metrics']['volume_24h']:,.2f}")
+            print(f"Unique Wallets: {market_metrics['volume_metrics']['unique_wallets_24h']:,}")
+            
+            # Show trading style scores
+            scores = result['market_score']
+            print(f"Momentum Score: {scores['momentum_score']}/6")
+            print(f"Day Trading Score: {scores['daytrading_score']}/6") 
+            print(f"Swing Trading Score: {scores['swing_score']}/6")
+        else:
+            print(f"❌ ERROR: {result.get('error', 'Unknown error')}")
+    
+    def test_token(name, address, expected_chain):
+        try:
+            tool = MarketAnalysis(address=address)
+            result = tool.run()
+            print_result(name, address, expected_chain, result)
+            
+            if result.get('chain') != expected_chain:
+                print(f"⚠️  Chain detection mismatch!")
+                
+        except Exception as e:
+            print(f"❌ ERROR testing {name}: {str(e)}")
+
+    print_separator("MARKET ANALYSIS - MANUAL TESTING")
+    print(f"Test started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    print_separator("SOLANA TOKENS")
+
+    solana_tests = [
+        {
+            "name": "JTO Token (Well-known)",
+            "address": "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",
+            "expected_chain": "solana"
+        },
+        {
+            "name": "BONK Token (Meme coin)", 
+            "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+            "expected_chain": "solana"
+        },
+        {
+            "name": "SOL Token (Native)",
+            "address": "So11111111111111111111111111111111111111112",
+            "expected_chain": "solana"
+        }
+    ]
+    
+    for test in solana_tests:
+        print(f"\n🧪 Testing: {test['name']}")
+        test_token(test['name'], test['address'], test['expected_chain'])
+    
+    print_separator("BASE TOKENS")
+
+    base_tests = [
+        {
+            "name": "ZORA Token",
+            "address": "0x1111111111166b7FE7bd91427724B487980aFc69",
+            "expected_chain": "base"
+        },
+        {
+            "name": "USDC on Base",
+            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "expected_chain": "base"
+        },
+        {
+            "name": "Ethereum on Base (Wrapped)",
+            "address": "0x4200000000000000000000000000000000000006",
+            "expected_chain": "base"
+        }
+    ]
+    
+    for test in base_tests:
+        print(f"\n🧪 Testing: {test['name']}")
+        test_token(test['name'], test['address'], test['expected_chain'])
+    
+    print_separator("CHAIN AUTO-DETECTION TESTS")
+    
+    detection_tests = [
+        {
+            "address": "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",
+            "expected_chain": "solana",
+            "reason": "No 0x prefix"
+        },
+        {
+            "address": "0x1111111111166b7FE7bd91427724B487980aFc69",
+            "expected_chain": "base",
+            "reason": "0x prefix (ZORA token)"
+        }
+    ]
+    
+    for test in detection_tests:
+        tool = MarketAnalysis(address=test['address'])
+        detected = tool._detect_chain(test['address'])
+        status = "✅" if detected == test['expected_chain'] else "❌"
+        print(f"{status} {test['address'][:20]}... → {detected} ({test['reason']})")
+    
+    print_separator("DETAILED ANALYSIS EXAMPLE")
+    
+    # Show detailed analysis for one token
+    print("\n🔬 Running detailed analysis on ZORA (Base token)...")
+    tool = MarketAnalysis(address="0x1111111111166b7FE7bd91427724B487980aFc69")
     result = tool.run()
-    print("\n" + "="*60)
-    print("📊 COMPREHENSIVE MARKET ANALYSIS")
-    print("="*60)
     
-    print("\n📈 MARKET METRICS:")
-    market_metrics = result['market_metrics']
-    print(f"Volume 24h: ${market_metrics['volume_metrics']['volume_24h']:,.2f}")
-    print(f"Price: ${market_metrics['price_metrics']['price']:.6f}")
-    print(f"Price Change 24h: {market_metrics['price_metrics']['price_change_24h']:+.2f}%")
-    
-    print("\n🎯 TRADING STYLE ANALYSIS:")
-    ta = result['technical_analysis']
-    
-    print(f"\n🚀 MOMENTUM TRADING (Score: {result['market_score']['momentum_score']}/6):")
-    momentum = ta.get('momentum_trading', {})
-    if momentum:
-        print(f"  RSI: {momentum.get('rsi', 0):.1f} ({momentum.get('rsi_signal', 'N/A')})")
-        print(f"  Stochastic: {momentum.get('stochastic_k', 0):.1f} ({momentum.get('stochastic_signal', 'N/A')})")
-        print(f"  Bollinger Position: {momentum.get('bollinger_position', 0)*100:.1f}%")
-    
-    print(f"\n⚡ DAY TRADING / SCALPING (Score: {result['market_score']['daytrading_score']}/6):")
-    daytrading = ta.get('day_trading', {})
-    if daytrading:
-        print(f"  VWAP: ${daytrading.get('vwap', 0):.6f}")
-        print(f"  Price vs VWAP: {daytrading.get('price_to_vwap', 0):+.2f}%")
-        print(f"  CMF: {daytrading.get('cmf', 0):.3f} ({daytrading.get('cmf_signal', 'N/A')})")
-        print(f"  Volume Trend: {daytrading.get('volume_trend', 0):+.1f}%")
-    
-    print(f"\n📈 SWING TRADING (Score: {result['market_score']['swing_score']}/6):")
-    swing = ta.get('swing_trading', {})
-    if swing:
-        print(f"  EMA 50/200: ${swing.get('ema_50', 0):.6f}/${swing.get('ema_200', 0):.6f}")
-        print(f"  EMA Signal: {swing.get('ema_cross_signal', 'N/A')}")
-        print(f"  MACD: {swing.get('macd_trend', 'N/A')}")
-        print(f"  ATR: {swing.get('atr_percent', 0):.2f}% of price")
-        print(f"  Nearest Fib: {swing.get('closest_fib_level', 'N/A')} ({swing.get('fib_distance', 0):.1f}% away)")
-    
-    print(f"\n📊 OVERALL MARKET SCORE: {result['market_score']['score']}/100")
-    print(f"Positive Signals: {result['market_score']['positive_points']}")
-    print(f"Negative Signals: {result['market_score']['negative_points']}")
-    
-    print("\n💡 TRADING SIGNALS BY STYLE:")
-    summary = result['summary']
-    
-    print("\n🚀 Momentum Trading:")
-    for point in summary.get('momentum_trading', []):
-        print(f"  • {point}")
+    if result.get('success'):
+        print(f"\n📊 COMPREHENSIVE MARKET ANALYSIS - {result['chain'].upper()}")
+        print("="*60)
         
-    print("\n⚡ Day Trading:")
-    for point in summary.get('day_trading', []):
-        print(f"  • {point}")
+        print(f"\n📈 MARKET METRICS:")
+        market_metrics = result['market_metrics']
+        print(f"Volume 24h: ${market_metrics['volume_metrics']['volume_24h']:,.2f}")
+        print(f"Price: ${market_metrics['price_metrics']['price']:.6f}")
+        print(f"Price Change 24h: {market_metrics['price_metrics']['price_change_24h']:+.2f}%")
+        print(f"Holders/Wallets: {market_metrics['volume_metrics']['unique_wallets_24h']:,}")
         
-    print("\n📈 Swing Trading:")
-    for point in summary.get('swing_trading', []):
-        print(f"  • {point}")
-    
-    print("\n" + "="*60)
+        print(f"\n🎯 TRADING STYLE ANALYSIS:")
+        ta = result['technical_analysis']
+        
+        print(f"\n🚀 MOMENTUM TRADING (Score: {result['market_score']['momentum_score']}/6):")
+        momentum = ta.get('momentum_trading', {})
+        if momentum:
+            print(f"  RSI: {momentum.get('rsi', 0):.1f} ({momentum.get('rsi_signal', 'N/A')})")
+            print(f"  Stochastic: {momentum.get('stochastic_k', 0):.1f} ({momentum.get('stochastic_signal', 'N/A')})")
+            print(f"  Bollinger Position: {momentum.get('bollinger_position', 0)*100:.1f}%")
+        
+        print(f"\n⚡ DAY TRADING / SCALPING (Score: {result['market_score']['daytrading_score']}/6):")
+        daytrading = ta.get('day_trading', {})
+        if daytrading:
+            print(f"  VWAP: ${daytrading.get('vwap', 0):.6f}")
+            print(f"  Price vs VWAP: {daytrading.get('price_to_vwap', 0):+.2f}%")
+            print(f"  CMF: {daytrading.get('cmf', 0):.3f} ({daytrading.get('cmf_signal', 'N/A')})")
+            print(f"  Volume Trend: {daytrading.get('volume_trend', 0):+.1f}%")
+        
+        print(f"\n📈 SWING TRADING (Score: {result['market_score']['swing_score']}/6):")
+        swing = ta.get('swing_trading', {})
+        if swing:
+            print(f"  EMA 50/200: ${swing.get('ema_50', 0):.6f}/${swing.get('ema_200', 0):.6f}")
+            print(f"  EMA Signal: {swing.get('ema_cross_signal', 'N/A')}")
+            print(f"  MACD: {swing.get('macd_trend', 'N/A')}")
+            print(f"  ATR: {swing.get('atr_percent', 0):.2f}% of price")
+            print(f"  Nearest Fib: {swing.get('closest_fib_level', 'N/A')} ({swing.get('fib_distance', 0):.1f}% away)")
+        
+        print(f"\n📊 OVERALL MARKET SCORE: {result['market_score']['score']}/100")
+        print(f"Positive Signals: {result['market_score']['positive_points']}")
+        print(f"Negative Signals: {result['market_score']['negative_points']}")
+        
+        print("\n💡 TRADING SIGNALS BY STYLE:")
+        summary = result['summary']
+        
+        print("\n🚀 Momentum Trading:")
+        for point in summary.get('momentum_trading', []):
+            print(f"  • {point}")
+            
+        print("\n⚡ Day Trading:")
+        for point in summary.get('day_trading', []):
+            print(f"  • {point}")
+            
+        print("\n📈 Swing Trading:")
+        for point in summary.get('swing_trading', []):
+            print(f"  • {point}")
+       

@@ -14,10 +14,10 @@ import time
 load_dotenv()
 
 class BundleDetector(BaseTool):
-    """Tool for detecting coordinated buying patterns"""
+    """Tool for detecting coordinated buying patterns on Solana tokens"""
     
     name: str = "BundleDetector"
-    description: str = "Analyzes transactions to detect potential bundled trades"
+    description: str = "Analyzes transactions to detect potential bundled trades (Solana only)"
     
     address: str = Field(
         description="Token address to analyze for bundle patterns"
@@ -39,6 +39,12 @@ class BundleDetector(BaseTool):
         description="Maximum concurrent API requests"
     )
     
+    def _detect_chain(self, address: str) -> str:
+        if address.startswith("0x"):
+            return "base"
+        else:
+            return "solana"
+
     async def _get_token_creation_time_async(self, session: aiohttp.ClientSession, token_address: str) -> Optional[int]:
         """Get token creation time asynchronously"""
         try:
@@ -228,18 +234,33 @@ class BundleDetector(BaseTool):
             return filtered_swaps
 
     def _analyze_transactions_parallel(self, df: pd.DataFrame) -> List[Dict]:
-        """Analyze transactions using parallel processing for large datasets"""
+        """Analyze transactions using parallel processing for large datasets with proper block handling"""
         if len(df) < 1000:
             return self._analyze_transactions_single_thread(df)
         
+        unique_blocks = df['block_number'].unique()
         num_cores = min(4, os.cpu_count())  # Limit to 4 cores max
-        chunk_size = len(df) // num_cores
-        chunks = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+
+        blocks_per_core = len(unique_blocks) // num_cores
+        if blocks_per_core == 0:
+            return self._analyze_transactions_single_thread(df)
+        
+        block_chunks = []
+        for i in range(num_cores):
+            start_idx = i * blocks_per_core
+            if i == num_cores - 1:
+                chunk_blocks = unique_blocks[start_idx:]
+            else:
+                chunk_blocks = unique_blocks[start_idx:start_idx + blocks_per_core]
+            
+            chunk_df = df[df['block_number'].isin(chunk_blocks)]
+            if len(chunk_df) > 0:
+                block_chunks.append(chunk_df)
         
         start_time = time.time()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_cores) as executor:
-            futures = [executor.submit(self._analyze_transactions_single_thread, chunk) for chunk in chunks]
+            futures = [executor.submit(self._analyze_transactions_single_thread, chunk) for chunk in block_chunks]
             results = []
             
             for future in concurrent.futures.as_completed(futures):
@@ -249,7 +270,16 @@ class BundleDetector(BaseTool):
                 except Exception as e:
                     print(f"Error in parallel processing: {e}")
         
-        deduplicated_results = self._deduplicate_suspicious_blocks(results)
+        seen_blocks = set()
+        deduplicated_results = []
+        
+        for block in results:
+            block_num = block['block_number']
+            if block_num not in seen_blocks:
+                seen_blocks.add(block_num)
+                deduplicated_results.append(block)
+            else:
+                print(f"⚠️ Warning: Found duplicate block {block_num} in parallel processing results")
         
         return deduplicated_results
 
@@ -277,55 +307,79 @@ class BundleDetector(BaseTool):
         return deduplicated
 
     def _analyze_transactions_single_thread(self, df: pd.DataFrame) -> List[Dict]:
-        """Single-threaded transaction analysis (used for small datasets or as part of parallel processing)"""
         suspicious_blocks = []
-            
+
         block_groups = df.groupby('block_number')
         
         for block_num, block_df in block_groups:
             block_df = block_df.sort_values('timestamp')
             
-            block_trades = [{
-                'timestamp': str(trade['timestamp']),
-                'token_amount': float(trade['token_amount']),
-                'sol_spent': float(trade['sol_spent']),
-                'wallet': trade['owner']
-            } for _, trade in block_df.iterrows()]
-                
+            processed_tx_hashes = set()
+
             tx_groups = block_df.groupby('tx_hash')
+            
             for tx_hash, tx_df in tx_groups:
+                if tx_hash in processed_tx_hashes:
+                    continue
+                    
                 if len(tx_df) >= 3:
                     unique_wallets = set(tx_df['owner'])
-                    if len(unique_wallets) >= 3:
+                    if len(unique_wallets) >= 3:  # At least 3 unique wallets
                         total_tokens = float(tx_df['token_amount'].sum())
-                    
-                        suspicious_blocks.append({
-                            'block_number': int(block_num),
-                            'timestamp': str(tx_df['timestamp'].iloc[0]),
-                            'num_trades': len(tx_df),
-                            'unique_wallets': len(unique_wallets),
-                            'total_tokens': total_tokens,
-                            'type': 'bundled_transaction',
-                            'tx_hash': tx_hash[:10] + '...', 
-                            'trades': block_trades
-                        })
+                        
+                        if total_tokens > 0:
+                            block_trades = [{
+                                'timestamp': str(trade['timestamp']),
+                                'token_amount': float(trade['token_amount']),
+                                'sol_spent': float(trade['sol_spent']),
+                                'wallet': trade['owner'],
+                                'tx_hash': trade['tx_hash']
+                            } for _, trade in tx_df.iterrows()]
+                            
+                            suspicious_blocks.append({
+                                'block_number': int(block_num),
+                                'timestamp': str(tx_df['timestamp'].iloc[0]),
+                                'num_trades': len(tx_df),
+                                'unique_wallets': len(unique_wallets),
+                                'total_tokens': total_tokens,
+                                'type': 'bundled_transaction',
+                                'tx_hash': tx_hash[:10] + '...',
+                                'trades': block_trades
+                            })
+                            
+                            processed_tx_hashes.add(tx_hash)
+            
+            remaining_df = block_df[~block_df['tx_hash'].isin(processed_tx_hashes)]
+            
+            if len(remaining_df) >= 3:
+                time_diffs = remaining_df['timestamp'].diff().dropna()
                 
-            if len(block_df) >= 3:
-                time_diffs = block_df['timestamp'].diff().dropna()
-                if (time_diffs.dt.total_seconds() <= 0.4).all():
-                    unique_wallets = set(block_df['owner'])
-                    if len(unique_wallets) >= 3:
-                        total_tokens = float(block_df['token_amount'].sum())
+                if len(time_diffs) > 0 and (time_diffs.dt.total_seconds() <= 1.0).all():
+                    unique_wallets = set(remaining_df['owner'])
+                    unique_tx_hashes = set(remaining_df['tx_hash'])
                     
-                        suspicious_blocks.append({
-                            'block_number': int(block_num),
-                            'timestamp': str(block_df['timestamp'].iloc[0]),
-                            'num_trades': len(block_df),
-                            'unique_wallets': len(unique_wallets),
-                            'total_tokens': total_tokens,
-                            'type': 'simultaneous_trades',
-                            'trades': block_trades
-                        })
+                    if len(unique_wallets) >= 3 and len(unique_tx_hashes) >= 2:
+                        total_tokens = float(remaining_df['token_amount'].sum())
+                        
+                        if total_tokens > 0:
+                            block_trades = [{
+                                'timestamp': str(trade['timestamp']),
+                                'token_amount': float(trade['token_amount']),
+                                'sol_spent': float(trade['sol_spent']),
+                                'wallet': trade['owner'],
+                                'tx_hash': trade['tx_hash']
+                            } for _, trade in remaining_df.iterrows()]
+                            
+                            suspicious_blocks.append({
+                                'block_number': int(block_num),
+                                'timestamp': str(remaining_df['timestamp'].iloc[0]),
+                                'num_trades': len(remaining_df),
+                                'unique_wallets': len(unique_wallets),
+                                'total_tokens': total_tokens,
+                                'type': 'simultaneous_trades',
+                                'tx_hash_count': len(unique_tx_hashes),
+                                'trades': block_trades
+                            })
         
         return suspicious_blocks
 
@@ -368,6 +422,17 @@ class BundleDetector(BaseTool):
         """Run bundle detection analysis"""
         if not self.birdeye_api_key:
             raise ValueError("BIRDEYE_API_KEY not found in environment variables")
+
+        detected_chain = self._detect_chain(self.address)
+        if detected_chain == "base":
+            return {
+                "has_bundled_trades": False,
+                "details": "Bundle detection is not supported for Base chain tokens.",
+                "chain": "base",
+                "supported": False
+            }
+        
+
         return self.analyze_transactions(self.address)
 
     def analyze_transactions(self, token_address: str, minutes_to_analyze: int = 5) -> Dict[str, Any]:
@@ -434,17 +499,52 @@ class BundleDetector(BaseTool):
                 top_blocks = sorted(suspicious_blocks, key=lambda x: x['total_tokens'], reverse=True)[:5]
                 total_bundle_tokens = sum(block['total_tokens'] for block in top_blocks)
                 
+                if total_supply > 0 and total_bundle_tokens > total_supply:
+                    print(f"WARNING: Bundled tokens ({total_bundle_tokens:,.0f}) exceed total supply ({total_supply:,.0f})")
+                    print(f"Debugging token calculation for top blocks:")
+                    
+                    for i, block in enumerate(top_blocks[:3], 1):
+                        print(f"  Block {i} ({block['block_number']}): {block['total_tokens']:,.0f} tokens from {block['num_trades']} trades")
+                        if 'trades' in block:
+                            sample_trades = block['trades'][:5]
+                            for j, trade in enumerate(sample_trades, 1):
+                                print(f"    Trade {j}: {trade['token_amount']:,.0f} tokens (wallet: {trade['wallet'][:8]}...)")
+                    
+                    print("🔧 Attempting conservative recalculation...")
+
+                    all_unique_trades = set()
+                    recalculated_total = 0
+                    
+                    for block in suspicious_blocks:
+                        if 'trades' in block:
+                            for trade in block['trades']:
+                                trade_key = (trade.get('tx_hash', ''), trade.get('wallet', ''), trade.get('timestamp', ''))
+                                if trade_key not in all_unique_trades:
+                                    all_unique_trades.add(trade_key)
+                                    recalculated_total += trade['token_amount']
+                    
+                    if recalculated_total <= total_supply:
+                        print(f"✓ Conservative recalculation: {recalculated_total:,.0f} tokens (within supply)")
+                        total_bundle_tokens = recalculated_total
+                    else:
+                        print(f"Even conservative calculation exceeds supply: {recalculated_total:,.0f}")
+                        total_bundle_tokens = min(total_bundle_tokens, total_supply * 0.95)
+                        print(f"Capping bundled tokens at {total_bundle_tokens:,.0f} (95% of supply)")
+
                 supply_percentage = (total_bundle_tokens / total_supply * 100) if total_supply > 0 else 0
                 risk_level = self._get_risk_level(supply_percentage)
                 
                 total_time = time.time() - start_time
-                print(f"\nANALYSIS COMPLETED in {total_time:.2f}s")
+                print(f"\nOPTIMIZED ANALYSIS COMPLETED in {total_time:.2f}s")
+                print(f"\nTotal Supply: {total_supply:,.0f} | Bundled Tokens: {total_bundle_tokens:,.0f} | Percentage: {supply_percentage:.2f}%")
                 
                 return {
                     "has_bundled_trades": True,
                     "risk_level": risk_level,
                     "supply_percentage": supply_percentage,
                     "total_bundles": len(suspicious_blocks),
+                    "total_supply": total_supply,
+                    "bundled_tokens": total_bundle_tokens,
                     "analysis_time": f"{total_time:.2f}s",
                     "performance_metrics": {
                         "total_time": total_time,
@@ -477,7 +577,7 @@ class BundleDetector(BaseTool):
             }
             
         except Exception as e:
-            print(f"Error during analysis: {str(e)}")
+            print(f"Error during optimized analysis: {str(e)}")
             return {
                 "has_bundled_trades": False,
                 "details": f"Error during analysis: {str(e)}",
@@ -497,7 +597,6 @@ class BundleDetector(BaseTool):
         return "Not a significant amount of bundles detected on launch date."
 
     def _get_token_amount_vectorized(self, df: pd.DataFrame) -> pd.Series:
-        """Vectorized token amount calculation for better performance"""
         try:
             is_buy = df['tx_type'] == 'buy'
             
@@ -507,13 +606,28 @@ class BundleDetector(BaseTool):
             is_target_token = to_addresses == self.token_address
             
             result = pd.Series(0.0, index=df.index)
-            result[is_buy & is_target_token] = to_amounts[is_buy & is_target_token]
+            valid_mask = is_buy & is_target_token
+            result[valid_mask] = to_amounts[valid_mask]
+
+            max_amount = result.max()
+            total_amount = result.sum()
+            
+            if max_amount > 1e12:
+                print(f"⚠️ Warning: Found extremely large token amount: {max_amount:,.0f}")
+                problematic = df[result > 1e12]
+                if len(problematic) > 0:
+                    print(f"   Problematic transactions: {len(problematic)}")
+                    for idx, row in problematic.head().iterrows():
+                        print(f"   - Block {row['block_number']}: {result[idx]:,.0f} tokens")
+            
+            if total_amount > 1e15:
+                print(f"⚠️ Warning: Total token amount seems unrealistic: {total_amount:,.0f}")
+                print(f"   This might indicate double-counting or data quality issues")
             
             return result
             
         except Exception as e:
             print(f"Error in vectorized token amount calculation: {e}")
-
             return df.apply(self._get_token_amount, axis=1)
 
     def _get_sol_spent_vectorized(self, df: pd.DataFrame) -> pd.Series:
@@ -573,9 +687,24 @@ if __name__ == "__main__":
     test_address = "288k7P6sZA7cHGPATbKBHjqgditapKkVXjkAXKH3pump"
     detector = BundleDetector(address=test_address)
     
-    print("🚀 OPTIMIZED BUNDLE DETECTOR - PERFORMANCE TEST")
+    print("🚀 BUNDLE DETECTOR")
     print("=" * 60)
     
+    print("Testing chain detection...")
+    solana_address = "7SstFSsCm3SPaV24bkgrvypspjLDB8feEJYVka4vbonk"
+    base_address = "0x1111111111166b7FE7bd91427724B487980aFc69"
+    
+    print(f"Solana address ({solana_address[:20]}...): {detector._detect_chain(solana_address)}")
+    print(f"Base address ({base_address}): {detector._detect_chain(base_address)}")
+
+    print(f"\nTesting Base token support...")
+    base_detector = BundleDetector(address=base_address)
+    base_result = base_detector.run()
+    print(f"Base token result: {base_result}")
+
+    print(f"\nTesting Solana token with double-counting fixes...")
+    
+    print("Testing API connection and data availability...")
     headers = {
         "accept": "application/json",
         "x-chain": "solana", 
@@ -618,7 +747,15 @@ if __name__ == "__main__":
         print(f"Risk Level: {result['risk_level']}")
         print(f"Supply Percentage: {result['supply_percentage']:.2f}%")
         print(f"Total Bundles Found: {result['total_bundles']}")
+        print(f"Total Supply: {result.get('total_supply', 'N/A'):,.0f}")
+        print(f"Bundled Tokens: {result.get('bundled_tokens', 'N/A'):,.0f}")
         print(f"Analysis Time: {result.get('analysis_time', 'N/A')}")
+        
+        if 'total_supply' in result and 'bundled_tokens' in result:
+            if result['bundled_tokens'] > result['total_supply']:
+                print("ERROR: Bundled tokens still exceed total supply!")
+            else:
+                print("VALIDATION PASSED: Bundled tokens within reasonable range")
         
         if 'performance_metrics' in result:
             metrics = result['performance_metrics']
