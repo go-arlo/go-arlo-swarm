@@ -1,12 +1,27 @@
-agency_swarm==0.5.1
-fastapi==0.115.6
-jsonschema==4.23.0
-pandas==2.2.3
-psycopg2_binary==2.9.10
-pydantic==2.8.2
-python-dotenv==1.0.1
-requests==2.32.3
-tweepy==4.15.0
-uvicorn==0.34.0
-aiohttp==3.10.3
-websockets==10.4
+# Main framework
+agency-swarm==1.2.1
+
+# AI and API clients
+openai>=1.107.1,<2.0
+openai-agents[litellm]
+
+# HTTP client for external APIs (Moralis, TweetScout)
+aiohttp>=3.8.0
+httpx>=0.27.0
+
+# Data validation and settings
+pydantic>=2.11,<3.0
+pydantic-settings>=2.6.0
+
+# Environment and utilities
+python-dotenv>=1.1.1,<2.0
+
+# Caching
+cachetools>=6.2.1
+
+# Twitter integration
+tweepy>=4.16.0
+
+# FastAPI and web server
+fastapi>=0.120.3
+uvicorn>=0.38.0
