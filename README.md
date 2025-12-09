@@ -54,10 +54,10 @@ python test_agency.py --address So11111111111111111111111111111111111111112 --sy
 
 The system generates four structured narrative sections:
 
-1. **Market Overview** (max 500 chars): Price action, valuation, volume/liquidity analysis
-2. **Holder Insights** (max 500 chars): Distribution patterns and concentration analysis
-3. **Safety Notes** (max 500 chars): Risk assessment based on available metrics
-4. **Social & Trends** (max 500 chars): Sentiment classification and trending topics
+1. **Market Overview**: Price action, valuation, volume/liquidity analysis
+2. **Holder Insights**: Distribution patterns and concentration analysis
+3. **Safety Notes**: Risk assessment based on available metrics
+4. **Social & Trends**: Sentiment classification and trending topics
 
 ## Files Structure
 
