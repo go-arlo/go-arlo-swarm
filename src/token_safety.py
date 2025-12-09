@@ -26,6 +26,24 @@ class TokenSafetyAnalyzer:
         if not self.api_key:
             raise ValueError("BIRDEYE_API_KEY not found in environment variables")
 
+    def _safe_float(self, value, default=0.0):
+        """Safely convert a value to float, handling empty strings and None"""
+        if value is None or value == '':
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_int(self, value, default=0):
+        """Safely convert a value to int, handling empty strings and None"""
+        if value is None or value == '':
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
     async def analyze_token_safety(self, token_address: str, chain: str) -> Dict[str, Any]:
         """
         Analyze token safety for given address and chain
@@ -154,12 +172,12 @@ class TokenSafetyAnalyzer:
             "security_checks": security_checks,
             "overall_risk": risk_level,
             "key_metrics": {
-                "owner_percentage": float(data.get("ownerPercentage", "0")),
+                "owner_percentage": self._safe_float(data.get("ownerPercentage", "0")),
                 "is_honeypot": data.get("isHoneypot", "0") == "1",
                 "is_open_source": data.get("isOpenSource", "0") == "1",
-                "buy_tax": float(data.get("buyTax", "0")),
-                "sell_tax": float(data.get("sellTax", "0")),
-                "holder_count": int(data.get("holderCount", "0"))
+                "buy_tax": self._safe_float(data.get("buyTax", "0")),
+                "sell_tax": self._safe_float(data.get("sellTax", "0")),
+                "holder_count": self._safe_int(data.get("holderCount", "0"))
             }
         }
 
@@ -249,7 +267,7 @@ class TokenSafetyAnalyzer:
         """Analyze EVM contract control status"""
 
         owner_address = data.get("ownerAddress", "")
-        owner_percentage = float(data.get("ownerPercentage", "0"))
+        owner_percentage = self._safe_float(data.get("ownerPercentage", "0"))
         can_take_back_ownership = data.get("canTakeBackOwnership", "0") == "1"
         is_mintable = data.get("isMintable", "0") == "1"
 
@@ -287,9 +305,9 @@ class TokenSafetyAnalyzer:
             control_issues.append("blacklist functionality")
 
         # Check for taxes
-        buy_tax = float(data.get("buyTax", "0"))
-        sell_tax = float(data.get("sellTax", "0"))
-        transfer_tax = float(data.get("transferTax", "0"))
+        buy_tax = self._safe_float(data.get("buyTax", "0"))
+        sell_tax = self._safe_float(data.get("sellTax", "0"))
+        transfer_tax = self._safe_float(data.get("transferTax", "0"))
 
         if buy_tax > 0:
             control_issues.append(f"buy tax ({buy_tax}%)")
@@ -314,7 +332,7 @@ class TokenSafetyAnalyzer:
     def _analyze_evm_liquidity(self, data: Dict) -> Dict[str, Any]:
         """Analyze EVM token liquidity"""
 
-        lp_holder_count = int(data.get("lpHolderCount", "0"))
+        lp_holder_count = self._safe_int(data.get("lpHolderCount", "0"))
         lp_holders = data.get("lpHolders", [])
 
         # Check for locked liquidity

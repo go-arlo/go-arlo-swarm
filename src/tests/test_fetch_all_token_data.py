@@ -122,6 +122,9 @@ async def test_fetch_all_token_data(token_address: str, chain: str):
         market_health = result.get("market_health_24h")
         if market_health:
             if market_health.get("market_health_available"):
+                vol_change = market_health.get("volume_change_pct")
+                vol_change_str = f"{vol_change:+.1f}%" if vol_change is not None else "N/A"
+                
                 print_section("24H MARKET HEALTH", {
                     "market_health": market_health.get("market_health"),
                     "buy_pressure_pct": market_health.get("buy_pressure_pct"),
@@ -133,7 +136,7 @@ async def test_fetch_all_token_data(token_address: str, chain: str):
                     "current_price": market_health.get("current_price"),
                     "price_change_24h_pct": market_health.get("price_change_24h_pct"),
                     "total_volume_24h_usd": market_health.get("total_volume_24h_usd"),
-                    "volume_change_pct": market_health.get("volume_change_pct"),
+                    "volume_change_pct": vol_change_str,
                     "avg_volatility_pct": market_health.get("avg_volatility_pct"),
                     "data_points": market_health.get("data_points"),
                     "analysis_note": market_health.get("analysis_note")

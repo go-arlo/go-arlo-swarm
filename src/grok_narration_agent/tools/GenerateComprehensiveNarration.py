@@ -71,6 +71,7 @@ Generate exactly 5 narrative sections with the following specifications:
 - Focus ONLY on volume trends, market health, and trading patterns
 - Analyze what the metrics mean for trading momentum
 - Reference pressure dynamics, volatility, and liquidity implications
+- Optional: Mention circulation ratio if significantly low (<70%) as it affects market dynamics
 
 2. TOKEN SAFETY (max 500 chars):
 - Contract control status (renounced/not renounced)
@@ -78,6 +79,7 @@ Generate exactly 5 narrative sections with the following specifications:
 - Security analysis (honeypot, open source, verification status)
 - Overall safety assessment with clear status indicators
 - Chain-specific features (Jupiter verification for Solana)
+- Optional: Flag if very low circulation (<50%) indicates potential token unlocks
 
 3. HOLDER INSIGHTS (max 500 chars):
 - Distribution patterns and concentration
@@ -91,6 +93,7 @@ Generate exactly 5 narrative sections with the following specifications:
 - Focus on what the risks mean for investors, not technical details
 - Provide actionable guidance based on the combined risk factors
 - Avoid listing cluster details - summarize the overall risk impact
+- Optional: Include supply risk if circulation ratio <50% (unlock/dump risk)
 
 5. SOCIAL & TRENDS (max 500 chars):
 - Sentiment analysis results
@@ -129,8 +132,14 @@ GOOD Token Safety (Solana):
 GOOD Risk Assessment (Solana):
 "LOW bundling risk with minimal coordination detected. GOOD 24h market health shows declining volume but balanced pressure. Moderate holder concentration creates some manipulation risk. Overall: proceed cautiously, monitor for volume recovery."
 
+GOOD Risk Assessment (Solana with supply risk):
+"LOW bundling risk with minimal coordination detected. GOOD 24h market health but only 45% circulation creates unlock risk. Moderate holder concentration amplifies dump potential. Overall: high caution, monitor unlock schedule and volume patterns."
+
 GOOD Market Overview:
 "Volume down 30.8% signals declining interest despite GOOD market health. Slight sell pressure but balanced at 52% sells vs 48% buys. High trading activity per period with low 3.2% volatility indicates price stability. Liquidity sufficient for current volume levels."
+
+GOOD Market Overview (with low circulation):
+"Volume down 30.8% signals declining interest despite GOOD market health. Only 45% tokens circulating creates supply overhang risk. Balanced pressure at 52% sells vs 48% buys. Low 3.2% volatility aids stability but watch for unlock events."
 
 GOOD Holder Insights:
 "18,655 holders with 22.0% top-10 concentration creates moderate whale risk. Distribution better than many tokens but concentrated enough for potential manipulation. No recent holder growth data available."
@@ -141,6 +150,11 @@ GOOD Social & Trends:
 
     def _create_non_solana_prompt(self, data_summary: str, chain: str) -> str:
         """Create prompt for non-Solana tokens without bundling mentions"""
+
+        # Remove any bundling-related content from data_summary for non-Solana chains
+        import re
+        cleaned_summary = re.sub(r'.*(?:bundl|BUNDL|launch pattern|Launch Pattern).*\n?', '', data_summary, flags=re.IGNORECASE)
+
         return f"""
 ⚠️ ABSOLUTELY CRITICAL RULES - VIOLATIONS WILL INVALIDATE RESPONSE:
 1. NEVER include character counts like "(248 chars)" in ANY section
@@ -150,7 +164,7 @@ GOOD Social & Trends:
 
 Please generate professional narrative sections based on the following comprehensive token data:
 
-{data_summary}
+{cleaned_summary}
 
 🚨 CRITICAL NON-SOLANA CHAIN RULES ({chain.upper()}) 🚨:
 - ABSOLUTELY NO MENTION OF: bundling, bundles, bundle analysis, launch patterns
@@ -164,6 +178,7 @@ Generate exactly 5 narrative sections with the following specifications:
 - Focus ONLY on volume trends, market health, and trading patterns
 - Analyze what the metrics mean for trading momentum
 - Reference pressure dynamics, volatility, and liquidity implications
+- Optional: Mention circulation ratio if significantly low (<70%) as it affects market dynamics
 
 2. TOKEN SAFETY (max 500 chars):
 - Contract control status (renounced/not renounced)
@@ -171,6 +186,7 @@ Generate exactly 5 narrative sections with the following specifications:
 - Security analysis (honeypot, open source, verification status)
 - Overall safety assessment with clear status indicators
 - Chain-specific features (proxy contracts, locked liquidity)
+- Optional: Flag if very low circulation (<50%) indicates potential token unlocks
 
 3. HOLDER INSIGHTS (max 500 chars):
 - Distribution patterns and concentration
@@ -179,13 +195,14 @@ Generate exactly 5 narrative sections with the following specifications:
 - If no holder data available, acknowledge limitation briefly
 
 4. RISK ASSESSMENT (max 500 chars):
-- ABSOLUTELY NO MENTION OF: bundling, bundles, bundle analysis, launch patterns
-- START with market health status
-- THEN discuss holder concentration risk
+- ⛔ NEVER write phrases like: "Bundling risk: UNKNOWN", "bundling analysis unavailable", "Solana-only analysis"
+- START with market health status (EXCELLENT/GOOD/FAIR/LOW)
+- THEN discuss holder concentration risk (based on top 10 percentage)
 - THEN discuss volatility/liquidity risks
-- Combine available risk factors into coherent risk assessment
+- Combine ONLY these factors: market health + holder concentration + volatility + liquidity
 - Focus on what the risks mean for investors
 - Provide actionable guidance based on the combined risk factors
+- Optional: Include supply risk if circulation ratio <50% (unlock/dump risk)
 
 5. SOCIAL & TRENDS (max 500 chars):
 - Sentiment analysis results
@@ -224,8 +241,14 @@ GOOD Token Safety ({chain.upper()}):
 GOOD Risk Assessment ({chain.upper()}):
 "GOOD 24h market health with balanced buy/sell pressure despite declining volume. Moderate 22% holder concentration creates manipulation risk from whales. Low volatility aids stability. Combined risk: medium due to whale concentration. Monitor volume recovery and watch for large holder movements before major positions."
 
+GOOD Risk Assessment ({chain.upper()} with supply risk):
+"GOOD 24h market health with balanced pressure but only 48% circulation creates unlock risk. Moderate 22% holder concentration amplifies potential dumps. Low volatility positive but supply overhang concerning. Combined risk: high due to unlock potential. Monitor unlock schedule before positions."
+
 GOOD Market Overview:
 "Volume down 30.8% signals declining interest despite GOOD market health. Slight sell pressure but balanced at 52% sells vs 48% buys. High trading activity per period with low 3.2% volatility indicates price stability. Liquidity sufficient for current volume levels."
+
+GOOD Market Overview (with low circulation):
+"Volume down 30.8% signals declining interest despite GOOD market health. Only 48% tokens circulating creates supply pressure concerns. Balanced at 52% sells vs 48% buys indicates stability. Low 3.2% volatility positive but monitor unlock timeline."
 
 GOOD Holder Insights:
 "18,655 holders with 22.0% top-10 concentration creates moderate whale risk. Distribution better than many tokens but concentrated enough for potential manipulation. No recent holder growth data available."
@@ -233,11 +256,17 @@ GOOD Holder Insights:
 GOOD Social & Trends:
 "Bullish sentiment dominates community discussions highlighting innovation potential. Medium social volume with AI-crypto hype as key driver. Some concerns about volatility but no scam flags detected. Top trend: accumulation by major wallets."
 
-FORBIDDEN EXAMPLES FOR {chain.upper()}:
-❌ "UNKNOWN bundling risk on {chain} chain..." (NEVER write this)
-❌ "Bundle analysis unavailable..." (NEVER write this)
-❌ "Cannot assess launch patterns..." (NEVER write this)
-❌ "Chain limitations prevent..." (NEVER write this)
+FORBIDDEN EXAMPLES FOR {chain.upper()} - IF YOU WRITE ANY OF THESE, YOU FAIL:
+❌ "UNKNOWN bundling risk on {chain} chain..."
+❌ "Bundle analysis unavailable..."
+❌ "Cannot assess launch patterns..."
+❌ "Chain limitations prevent..."
+❌ "Bundling risk: UNKNOWN (Ethereum chain; Solana-only analysis unavailable)"
+❌ "No bundling data available for {chain}..."
+❌ "Bundling risk: UNKNOWN" (in ANY form)
+❌ ANY mention of bundling, bundles, or launch patterns whatsoever
+
+REMEMBER: For {chain.upper()} tokens, bundling DOES NOT EXIST. Don't mention it at all.
 """
 
     def _extract_data_from_message(self, message: str) -> dict:
@@ -284,6 +313,15 @@ FORBIDDEN EXAMPLES FOR {chain.upper()}:
             market_cap_match = re.search(r"Market Cap:\s*\$([0-9.,]+)", message)
             if market_cap_match:
                 extracted["market_data"]["market_cap_usd"] = market_cap_match.group(1)
+
+            # Extract supply data
+            total_supply_match = re.search(r"Total Supply:\s*([0-9,]+)", message)
+            if total_supply_match:
+                extracted["market_data"]["total_supply"] = total_supply_match.group(1)
+
+            circulating_supply_match = re.search(r"Circulating Supply:\s*([0-9,]+)", message)
+            if circulating_supply_match:
+                extracted["market_data"]["circulating_supply"] = circulating_supply_match.group(1)
 
             # Extract holder data
             holders_match = re.search(r"Total Holders:\s*([0-9,]+)", message)
@@ -449,7 +487,28 @@ FORBIDDEN EXAMPLES FOR {chain.upper()}:
         if extracted_data["market_data"]:
             sections.append("\nMARKET DATA:")
             for key, value in extracted_data["market_data"].items():
-                sections.append(f"- {key.replace('_', ' ').title()}: ${value}")
+                if key in ["total_supply", "circulating_supply"]:
+                    # Don't add $ for supply numbers
+                    sections.append(f"- {key.replace('_', ' ').title()}: {value}")
+                else:
+                    sections.append(f"- {key.replace('_', ' ').title()}: ${value}")
+
+            # Calculate and add circulation ratio if both supplies are available
+            if extracted_data["market_data"].get("total_supply") and extracted_data["market_data"].get("circulating_supply"):
+                try:
+                    total = float(extracted_data["market_data"]["total_supply"].replace(",", ""))
+                    circulating = float(extracted_data["market_data"]["circulating_supply"].replace(",", ""))
+                    if total > 0:
+                        circulation_ratio = (circulating / total) * 100
+                        sections.append(f"- Circulation Ratio: {circulation_ratio:.1f}%")
+
+                        # Add risk flag if circulation is very low
+                        if circulation_ratio < 50:
+                            sections.append(f"- ⚠️ Supply Risk: Only {circulation_ratio:.1f}% circulating (potential dump risk)")
+                        elif circulation_ratio < 70:
+                            sections.append(f"- ⚠️ Supply Note: {circulation_ratio:.1f}% circulating (monitor unlock schedule)")
+                except (ValueError, ZeroDivisionError):
+                    pass  # Skip if calculation fails
 
         # Holder data
         if extracted_data["holder_data"]:

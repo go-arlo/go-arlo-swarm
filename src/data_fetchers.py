@@ -31,7 +31,9 @@ class TokenMarketData(BaseModel):
     price_change_1h_percent: Optional[float]
     token_symbol: str
     token_name: str
-    ohlcv_5m: Optional[Dict[str, Any]]  # 5-minute OHLCV data
+    total_supply: Optional[int]
+    circulating_supply: Optional[int]
+    ohlcv_5m: Optional[Dict[str, Any]]
 
 
 class TokenHolderData(BaseModel):
@@ -192,6 +194,84 @@ async def fetch_ohlcv_data(
             return []
 
 
+async def fetch_birdeye_price_volume(
+    token_address: str,
+    chain: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch 24h price and volume data from BirdEye API.
+
+    Args:
+        token_address: Token contract address
+        chain: Blockchain name
+
+    Returns:
+        Dictionary with price, volume, and change percentages or None
+    """
+    api_key = os.getenv("BIRDEYE_API_KEY")
+    if not api_key:
+        print("⚠️  BIRDEYE_API_KEY not set - skipping price_volume data")
+        return None
+
+    # Map chain names to BirdEye format
+    chain_map = {
+        "solana": "solana",
+        "ethereum": "ethereum",
+        "base": "base",
+        "bnb": "bsc",
+        "bsc": "bsc",
+        "shibarium": "shibarium"
+    }
+
+    birdeye_chain = chain_map.get(chain.lower(), chain.lower())
+
+    base_url = "https://public-api.birdeye.so"
+    headers = {
+        "X-API-KEY": api_key,
+        "x-chain": birdeye_chain,
+        "Accept": "application/json"
+    }
+
+    url = f"{base_url}/defi/price_volume/single"
+    params = {
+        "address": token_address,
+        "type": "24h",
+        "ui_amount_mode": "raw"
+    }
+
+    async with aiohttp.ClientSession() as session:
+        await asyncio.sleep(0.2)  # Rate limiting
+
+        try:
+            async with session.get(url, headers=headers, params=params, timeout=30) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    print(f"⚠️  BirdEye price_volume API error: {response.status} - {error_text}")
+                    return None
+
+                data = await response.json()
+
+                if not data.get("success") or not data.get("data"):
+                    print(f"⚠️  No price_volume data available")
+                    return None
+
+                result = data["data"]
+                print(f"✅ Fetched 24h price_volume data: Volume ${result.get('volumeUSD', 0):,.2f} ({result.get('volumeChangePercent', 0):+.1f}%)")
+
+                return {
+                    "price": safe_float(result.get("price", 0)),
+                    "volume_usd": safe_float(result.get("volumeUSD", 0)),
+                    "volume_change_percent": safe_float(result.get("volumeChangePercent", 0)),
+                    "price_change_percent": safe_float(result.get("priceChangePercent", 0)),
+                    "update_unix_time": result.get("updateUnixTime", 0),
+                    "update_human_time": result.get("updateHumanTime", "")
+                }
+
+        except Exception as e:
+            print(f"❌ Error fetching price_volume data: {str(e)}")
+            return None
+
+
 def analyze_price_action_selloff(
     ohlcv_data: List[Dict[str, Any]],
     bundle_start_time: int
@@ -343,7 +423,7 @@ async def analyze_24h_market_health(
     chain: str
 ) -> Dict[str, Any]:
     """
-    Analyze 24-hour market health using OHLCV data for comprehensive market assessment.
+    Analyze 24-hour market health using OHLCV data and price_volume endpoint.
 
     Args:
         token_address: Token contract address
@@ -356,6 +436,14 @@ async def analyze_24h_market_health(
     time_24h_ago = current_time - (24 * 60 * 60)  # 24 hours ago
 
     print(f"📊 Analyzing 24h market health for {chain}...")
+
+    # Fetch price_volume data for volume change
+    price_volume_data = await fetch_birdeye_price_volume(token_address, chain)
+    
+    # Get volume change percentage
+    volume_change_pct = None
+    if price_volume_data:
+        volume_change_pct = price_volume_data.get("volume_change_percent")
 
     # Fetch 15-minute candles for detailed analysis
     ohlcv_data = await fetch_ohlcv_data(
@@ -445,13 +533,6 @@ async def analyze_24h_market_health(
 
     avg_volatility = sum(volatility_periods) / len(volatility_periods) if volatility_periods else 0
 
-    # Volume change analysis (compare first half vs second half of 24h)
-    mid_point = len(volumes) // 2
-    first_half_volume = sum(volumes[:mid_point]) if mid_point > 0 else 0
-    second_half_volume = sum(volumes[mid_point:]) if mid_point < len(volumes) else 0
-
-    volume_change = ((second_half_volume - first_half_volume) / first_half_volume * 100) if first_half_volume > 0 else 0
-
     # Market sentiment assessment
     sentiment_factors = []
     sentiment_score = 0
@@ -483,15 +564,16 @@ async def analyze_24h_market_health(
         sentiment_score += 10
         sentiment_factors.append("Balanced buy/sell pressure")
 
-    # Volume trend factor (20 points max)
-    if volume_change > 50:
-        sentiment_score += 20
-        sentiment_factors.append(f"Increasing volume trend ({volume_change:+.1f}%)")
-    elif volume_change > 0:
-        sentiment_score += 10
-        sentiment_factors.append(f"Growing volume ({volume_change:+.1f}%)")
-    elif volume_change < -30:
-        sentiment_factors.append(f"Declining volume ({volume_change:+.1f}%)")
+    # Volume trend factor (20 points max) - only if volume change data available
+    if volume_change_pct is not None:
+        if volume_change_pct > 50:
+            sentiment_score += 20
+            sentiment_factors.append(f"Increasing volume trend ({volume_change_pct:+.1f}%)")
+        elif volume_change_pct > 0:
+            sentiment_score += 10
+            sentiment_factors.append(f"Growing volume ({volume_change_pct:+.1f}%)")
+        elif volume_change_pct < -30:
+            sentiment_factors.append(f"Declining volume ({volume_change_pct:+.1f}%)")
 
     # Volatility assessment (10 points max)
     if avg_volatility < 5:
@@ -527,7 +609,7 @@ async def analyze_24h_market_health(
         "pressure_dominance": pressure_dominance,
         "total_volume_24h_usd": round(total_volume, 2),
         "avg_volume_per_period_usd": round(avg_volume_per_period, 2),
-        "volume_change_pct": round(volume_change, 1),
+        "volume_change_pct": volume_change_pct,
         "avg_volatility_pct": round(avg_volatility, 1),
         "data_points": len(sorted_candles),
         "analysis_note": f"24h market health: {market_health} based on {len(sorted_candles)} 15m candles"
@@ -1158,7 +1240,17 @@ async def fetch_birdeye_market_data(chain: str, token_address: str) -> TokenMark
     price_usd = safe_float(token_info.get("price"))
     liquidity_usd = safe_float(token_info.get("liquidity"))
     market_cap_usd = safe_float(token_info.get("market_cap"))
-    fdv_usd = safe_float(token_info.get("total_supply", 0)) * price_usd if price_usd > 0 else market_cap_usd or 0
+
+    # Extract supply data and format without decimals
+    total_supply_raw = safe_float(token_info.get("total_supply", 0))
+    circulating_supply_raw = safe_float(token_info.get("circulating_supply", 0))
+
+    # Convert to integers (no decimal places)
+    total_supply = int(total_supply_raw) if total_supply_raw > 0 else None
+    circulating_supply = int(circulating_supply_raw) if circulating_supply_raw > 0 else None
+
+    # Calculate FDV using total supply
+    fdv_usd = total_supply_raw * price_usd if price_usd > 0 and total_supply_raw > 0 else market_cap_usd or 0
 
     # Get volume from trade data
     volume_24h_usd = safe_float(trade_info.get("volume_24h_usd", 0))
@@ -1187,6 +1279,8 @@ async def fetch_birdeye_market_data(chain: str, token_address: str) -> TokenMark
         price_change_1h_percent=price_change_1h,
         token_symbol=token_symbol,
         token_name=token_name,
+        total_supply=total_supply,
+        circulating_supply=circulating_supply,
         ohlcv_5m=ohlcv_data
     )
 
@@ -1944,6 +2038,8 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
             "liquidity_usd": market_data.liquidity_usd,
             "price_change_24h_percent": market_data.price_change_24h_percent,
             "price_change_1h_percent": market_data.price_change_1h_percent,
+            "total_supply": market_data.total_supply,
+            "circulating_supply": market_data.circulating_supply,
             "ohlcv_5m": market_data.ohlcv_5m,
         },
         "holder_data": (

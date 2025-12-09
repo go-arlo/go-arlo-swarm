@@ -90,6 +90,12 @@ async def test_single_token(token_address: str, chain: str = None, symbol: str =
             print(f"  🧮 FDV: ${market['fdv_usd']:,.0f}")
             print(f"  💧 Liquidity: ${market['liquidity_usd']:,.0f}")
             print(f"  🔁 24h Volume: ${market['volume_24h_usd']:,.0f}")
+            
+            # Add total supply and circulating supply
+            if market.get('total_supply') is not None:
+                print(f"  🪙 Total Supply: {market['total_supply']:,}")
+            if market.get('circulating_supply') is not None:
+                print(f"  💫 Circulating Supply: {market['circulating_supply']:,}")
 
             if data["holder_data"]:
                 holder = data["holder_data"]
@@ -128,11 +134,11 @@ async def test_single_token(token_address: str, chain: str = None, symbol: str =
                 else:
                     print(f"  Buy/Sell Pressure: {buy_pct} / {sell_pct} ({pressure_dominance})")
 
-                vol_change = health.get('volume_change_pct', 'N/A')
-                if vol_change != 'N/A':
+                vol_change = health.get('volume_change_pct')
+                if vol_change is not None:
                     print(f"  Volume Change: {vol_change:+.1f}%")
                 else:
-                    print(f"  Volume Change: {vol_change}")
+                    print(f"  Volume Change: N/A")
 
                 volatility = health.get('avg_volatility_pct', 'N/A')
                 if volatility != 'N/A':

@@ -25,3 +25,4 @@ tweepy>=4.16.0
 # FastAPI and web server
 fastapi>=0.120.3
 uvicorn>=0.38.0
+slowapi>=0.1.9
