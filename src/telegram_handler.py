@@ -273,7 +273,7 @@ class TelegramHandler:
         """
         try:
             # Lazy imports to avoid circular dependency
-            from main import analyze_token_with_cache, format_analysis_for_twitter
+            from main import analyze_token_with_cache
             
             print(f"Starting analysis for {token_data['symbol']} on {token_data['chain']}")
 
@@ -292,14 +292,8 @@ class TelegramHandler:
                 )
                 return
 
-            # Format analysis for Telegram (same as Twitter)
             data = analysis_result["data"]
-            formatted_analysis = format_analysis_for_twitter(
-                analysis_response=data["analysis_response"],
-                token_info=data["token_info"],
-                market_data=data["market_data"],
-                analysis_data=data
-            )
+            formatted_analysis = data["analysis_response"]
 
             # Send formatted analysis
             await self._send_message(chat_id, formatted_analysis, message_id)

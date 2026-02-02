@@ -1,9 +1,7 @@
-# Main framework
-agency-swarm==1.2.1
-
 # AI and API clients
 openai>=1.107.1,<2.0
 openai-agents[litellm]
+xai-sdk==1.5.0
 
 # HTTP client for external APIs (Moralis, TweetScout)
 aiohttp>=3.8.0
@@ -25,4 +23,13 @@ tweepy>=4.16.0
 # FastAPI and web server
 fastapi>=0.120.3
 uvicorn>=0.38.0
+
+# Job scheduling
+apscheduler>=3.11.1
+
+# Cryptography for Turnkey API signing
+cryptography>=46.0.3
 slowapi>=0.1.9
+
+# PostgreSQL database
+psycopg2-binary>=2.9.9

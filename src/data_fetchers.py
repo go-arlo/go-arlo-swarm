@@ -256,7 +256,9 @@ async def fetch_birdeye_price_volume(
                     return None
 
                 result = data["data"]
-                print(f"✅ Fetched 24h price_volume data: Volume ${result.get('volumeUSD', 0):,.2f} ({result.get('volumeChangePercent', 0):+.1f}%)")
+                volume_usd = safe_float(result.get("volumeUSD"))
+                volume_change = safe_float(result.get("volumeChangePercent"))
+                print(f"✅ Fetched 24h price_volume data: Volume ${volume_usd:,.2f} ({volume_change:+.1f}%)")
 
                 return {
                     "price": safe_float(result.get("price", 0)),
@@ -491,31 +493,49 @@ async def analyze_24h_market_health(
     sell_pressure_periods = 0
     neutral_periods = 0
 
+    # Volume-weighted pressure calculation
+    buy_volume = 0.0
+    sell_volume = 0.0
+    neutral_volume = 0.0
+
     for i, candle in enumerate(sorted_candles):
         open_price = opens[i]
         close_price = closes[i]
+        volume = volumes[i] if i < len(volumes) else 0.0
 
         if close_price > open_price:
             # Green candle = buy pressure
             buy_pressure_periods += 1
+            buy_volume += volume
         elif close_price < open_price:
             # Red candle = sell pressure
             sell_pressure_periods += 1
+            sell_volume += volume
         else:
             neutral_periods += 1
+            neutral_volume += volume
 
     total_periods = len(sorted_candles)
     buy_pressure_pct = (buy_pressure_periods / total_periods * 100) if total_periods > 0 else 0
     sell_pressure_pct = (sell_pressure_periods / total_periods * 100) if total_periods > 0 else 0
 
-    # Assess overall pressure dominance
-    if buy_pressure_pct > 60:
+    # Calculate volume-weighted buy pressure percentage
+    total_directional_volume = buy_volume + sell_volume
+    if total_directional_volume > 0:
+        volume_weighted_buy_pct = (buy_volume / total_directional_volume) * 100
+        volume_weighted_sell_pct = (sell_volume / total_directional_volume) * 100
+    else:
+        volume_weighted_buy_pct = 50.0
+        volume_weighted_sell_pct = 50.0
+
+    # Assess overall pressure dominance using volume-weighted values (more accurate)
+    if volume_weighted_buy_pct > 60:
         pressure_dominance = "STRONG_BUY"
-    elif buy_pressure_pct > 55:
+    elif volume_weighted_buy_pct > 55:
         pressure_dominance = "BUY"
-    elif sell_pressure_pct > 60:
+    elif volume_weighted_sell_pct > 60:
         pressure_dominance = "STRONG_SELL"
-    elif sell_pressure_pct > 55:
+    elif volume_weighted_sell_pct > 55:
         pressure_dominance = "SELL"
     else:
         pressure_dominance = "NEUTRAL"
@@ -553,16 +573,16 @@ async def analyze_24h_market_health(
     else:
         sentiment_factors.append(f"Significant price decline ({price_change_24h:+.1f}%)")
 
-    # Buy pressure factor (30 points max)
-    if buy_pressure_pct > 65:
+    # Buy pressure factor (30 points max) - using volume-weighted values
+    if volume_weighted_buy_pct > 65:
         sentiment_score += 30
-        sentiment_factors.append(f"Dominant buy pressure ({buy_pressure_pct:.1f}%)")
-    elif buy_pressure_pct > 55:
+        sentiment_factors.append(f"Dominant buy volume ({volume_weighted_buy_pct:.1f}%)")
+    elif volume_weighted_buy_pct > 55:
         sentiment_score += 20
-        sentiment_factors.append(f"Strong buy pressure ({buy_pressure_pct:.1f}%)")
-    elif buy_pressure_pct > 45:
+        sentiment_factors.append(f"Strong buy volume ({volume_weighted_buy_pct:.1f}%)")
+    elif volume_weighted_buy_pct > 45:
         sentiment_score += 10
-        sentiment_factors.append("Balanced buy/sell pressure")
+        sentiment_factors.append("Balanced buy/sell volume")
 
     # Volume trend factor (20 points max) - only if volume change data available
     if volume_change_pct is not None:
@@ -606,6 +626,10 @@ async def analyze_24h_market_health(
         "current_price": current_price,
         "buy_pressure_pct": round(buy_pressure_pct, 1),
         "sell_pressure_pct": round(sell_pressure_pct, 1),
+        "volume_weighted_buy_pct": round(volume_weighted_buy_pct, 1),
+        "volume_weighted_sell_pct": round(volume_weighted_sell_pct, 1),
+        "buy_volume_usd": round(buy_volume, 2),
+        "sell_volume_usd": round(sell_volume, 2),
         "pressure_dominance": pressure_dominance,
         "total_volume_24h_usd": round(total_volume, 2),
         "avg_volume_per_period_usd": round(avg_volume_per_period, 2),
@@ -1141,7 +1165,7 @@ def detect_chain(address: str) -> str:
         return "solana"
 
 
-async def fetch_birdeye_market_data(chain: str, token_address: str) -> TokenMarketData:
+async def fetch_birdeye_market_data(chain: str, token_address: str) -> Tuple[TokenMarketData, Optional[str]]:
     """Fetch comprehensive market data from BirdEye API"""
 
     api_key = os.getenv("BIRDEYE_API_KEY")
@@ -1236,6 +1260,37 @@ async def fetch_birdeye_market_data(chain: str, token_address: str) -> TokenMark
     token_info = market_data.get("data", {})
     trade_info = trade_data.get("data", {})
 
+    # Extract Twitter username from metadata extensions
+    twitter_username = None
+    extensions = metadata_info.get("extensions", {})
+    twitter_url = extensions.get("twitter", "")
+    website_url = extensions.get("website", "")
+
+    def extract_username_from_url(url: str) -> Optional[str]:
+        """Extract username from x.com or twitter.com profile URL."""
+        if not url:
+            return None
+        # Check if it's a valid profile URL (not a status/tweet URL)
+        if "/status/" in url:
+            return None
+        # Check if it's an x.com or twitter.com URL
+        if "x.com/" in url or "twitter.com/" in url:
+            parts = url.rstrip("/").split("/")
+            if parts:
+                username = parts[-1].split("?")[0]
+                # Validate username (not empty, not a reserved path)
+                if username and username not in ["home", "explore", "search", "i"]:
+                    return username
+        return None
+
+    # Try to extract from twitter field first
+    if twitter_url:
+        if "/status/" in twitter_url:
+            # Twitter field contains a tweet URL, check website instead
+            twitter_username = extract_username_from_url(website_url)
+        else:
+            twitter_username = extract_username_from_url(twitter_url)
+
     # Extract market metrics
     price_usd = safe_float(token_info.get("price"))
     liquidity_usd = safe_float(token_info.get("liquidity"))
@@ -1282,7 +1337,7 @@ async def fetch_birdeye_market_data(chain: str, token_address: str) -> TokenMark
         total_supply=total_supply,
         circulating_supply=circulating_supply,
         ohlcv_5m=ohlcv_data
-    )
+    ), twitter_username
 
 
 async def fetch_moralis_holder_data(
@@ -1835,6 +1890,57 @@ async def fetch_bundler_analysis(token_address: str) -> Optional[BundlerAnalysis
         )
 
 
+async def fetch_tweet_scout_score(twitter_username: str) -> Optional[float]:
+    """
+    Fetch TweetScout score for a Twitter username.
+
+    Args:
+        twitter_username: Twitter username to check
+
+    Returns:
+        Score as float or None if unavailable
+    """
+    api_key = os.getenv("TWEET_SCOUT_ID")
+    if not api_key:
+        print("⚠️  TWEET_SCOUT_ID not set - skipping TweetScout score")
+        return None
+
+    if not twitter_username or twitter_username.strip() == "":
+        print("⚠️  No Twitter username found - skipping TweetScout API call")
+        return None
+
+    # Use the correct TweetScout API URL format
+    url = f"https://api.tweetscout.io/v2/score/{twitter_username}"
+    headers = {
+        "Accept": "application/json",
+        "ApiKey": api_key
+    }
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            # Add rate limiting
+            await asyncio.sleep(0.2)
+
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status != 200:
+                    print(f"⚠️  TweetScout API error: {response.status}")
+                    return None
+
+                data = await response.json()
+                score = data.get("score")
+
+                if score is not None:
+                    print(f"✅ TweetScout score for @{twitter_username}: {score}")
+                    return float(score)
+                else:
+                    print(f"⚠️  No score returned for @{twitter_username}")
+                    return None
+
+        except Exception as e:
+            print(f"⚠️  Error fetching TweetScout score: {str(e)}")
+            return None
+
+
 async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]:
     """
     Fetch all token data from external APIs before agency initialization
@@ -1856,7 +1962,8 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
     # Task 1: Market data from BirdEye (required)
     async def fetch_market():
         try:
-            return await fetch_birdeye_market_data(chain, token_address)
+            market_data, twitter_username = await fetch_birdeye_market_data(chain, token_address)
+            return market_data, twitter_username
         except Exception as e:
             print(f"❌ Failed to fetch market data: {str(e)}")
             # Try to provide helpful error message
@@ -1881,10 +1988,13 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
 
     # Execute market and holder fetching in parallel
     print(f"⚡ Fetching market and holder data in parallel...")
-    market_data, holder_data = await asyncio.gather(
+    market_result, holder_data = await asyncio.gather(
         fetch_market(),
         fetch_holders()
     )
+
+    # Unpack market result
+    market_data, twitter_username = market_result
 
     # Task 3: Bundler analysis for Solana tokens only
     async def fetch_bundler():
@@ -1970,6 +2080,10 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
                 "sentiment_factors": market_health_analysis.get("sentiment_factors"),
                 "buy_pressure_pct": market_health_analysis.get("buy_pressure_pct"),
                 "sell_pressure_pct": market_health_analysis.get("sell_pressure_pct"),
+                "volume_weighted_buy_pct": market_health_analysis.get("volume_weighted_buy_pct"),
+                "volume_weighted_sell_pct": market_health_analysis.get("volume_weighted_sell_pct"),
+                "buy_volume_usd": market_health_analysis.get("buy_volume_usd"),
+                "sell_volume_usd": market_health_analysis.get("sell_volume_usd"),
                 "pressure_dominance": market_health_analysis.get("pressure_dominance"),
                 "avg_volume_per_period_usd": market_health_analysis.get("avg_volume_per_period_usd"),
                 "high_24h": market_health_analysis.get("h24_high"),
@@ -2001,7 +2115,52 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
                 "analysis_note": f"Analysis failed: {str(e)}"
             }
 
-    # Task 4: Token safety analysis
+    # Task 4: Sentiment data (Grok analysis + TweetScout score)
+    async def fetch_sentiment():
+        try:
+            from grok_sentiment import analyze_token_sentiment
+
+            # Initialize result dict
+            result = {
+                "twitter_username": twitter_username if twitter_username else None,
+                "tweet_scout_score": None,
+                "grok_sentiment": None,
+                "grok_scam_assessment": None,
+                "grok_overview": None
+            }
+
+            # Fetch TweetScout score if username available
+            if twitter_username and twitter_username.strip():
+                print(f"🐦 Found Twitter username: @{twitter_username}")
+                result["tweet_scout_score"] = await fetch_tweet_scout_score(twitter_username)
+            else:
+                print("⚠️  No Twitter username found in token metadata")
+
+            token_symbol = market_data.token_symbol
+            if token_symbol:
+                grok_response = await analyze_token_sentiment(token_symbol)
+                if grok_response.success and grok_response.result:
+                    result["grok_sentiment"] = grok_response.result.overall_sentiment.value
+                    result["grok_scam_assessment"] = grok_response.result.scam_assessment.value
+                    result["grok_overview"] = grok_response.result.overview
+                    result["grok_citations_count"] = grok_response.citations_count
+                    result["grok_sources_used"] = grok_response.sources_used
+                else:
+                    print(f"⚠️  Grok sentiment analysis failed: {grok_response.error}")
+
+            return result
+
+        except Exception as e:
+            print(f"⚠️  Sentiment data fetch failed: {str(e)}")
+            return {
+                "twitter_username": twitter_username if twitter_username else None,
+                "tweet_scout_score": None,
+                "grok_sentiment": None,
+                "grok_scam_assessment": None,
+                "grok_overview": None
+            }
+
+    # Task 5: Token safety analysis
     async def fetch_safety():
         try:
             from token_safety import analyze_token_safety
@@ -2017,11 +2176,12 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
             print(f"⚠️  Token safety analysis failed: {str(e)}")
             return None
 
-    # Execute bundler, market health, and safety analysis in parallel
-    print(f"⚡ Running bundler, market health, and safety analysis in parallel...")
-    bundler_data, market_health_data, safety_data = await asyncio.gather(
+    # Execute bundler, market health, sentiment, and safety analysis in parallel
+    print(f"⚡ Running bundler, market health, sentiment, and safety analysis in parallel...")
+    bundler_data, market_health_data, sentiment_data, safety_data = await asyncio.gather(
         fetch_bundler(),
         fetch_market_health(),
+        fetch_sentiment(),
         fetch_safety()
     )
 
@@ -2053,5 +2213,6 @@ async def fetch_all_token_data(token_address: str, chain: str) -> Dict[str, Any]
         ),
         "bundler_analysis": bundler_data,
         "market_health_24h": market_health_data,
+        "sentiment_data": sentiment_data,
         "safety_analysis": safety_data,
     }

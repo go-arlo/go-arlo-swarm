@@ -238,6 +238,12 @@ class TokenSafetyAnalyzer:
         creator_percentage = data.get("creatorPercentage", 0)
         top10_percent = data.get("top10HolderPercent", 0)
 
+        # Handle None values
+        if creator_percentage is None:
+            creator_percentage = 0
+        if top10_percent is None:
+            top10_percent = 0
+
         if creator_percentage > 0.05:  # 5%
             return {
                 "status": "negative",

@@ -223,13 +223,19 @@ def check_environment():
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Test GoArlo Crypto Summary Bot - Complete Workflow",
+        description="Test GoArlo Crypto Summary Bot - Data Fetching and Analysis",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Test data fetching only
   python test_agency.py --address So11111111111111111111111111111111111111112 --symbol SOL
   python test_agency.py --address 0x1234... --chain ethereum --symbol ETH
   python test_agency.py --samples
+
+  # Test complete flow with trading decisions and execution
+  python test_agency_with_trading.py --address <ADDRESS> --chain <CHAIN> --symbol <SYMBOL>
+  python test_agency_with_trading.py --samples
+  python test_agency_with_trading.py --address <SOLANA_ADDRESS> --execute  # REAL EXECUTION
         """,
     )
 
@@ -245,6 +251,9 @@ Examples:
     args = parser.parse_args()
 
     print("🚀 GoArlo Crypto Summary Bot - Test Suite")
+    print("=" * 50)
+    print("Note: This tests data fetching only.")
+    print("For complete flow with trading, use test_agency_with_trading.py")
     print("=" * 50)
 
     # Check environment

@@ -39,11 +39,15 @@ This is a streamlined two-agent system:
 - **AI Analysis**: Grok for sentiment and narrative generation
 
 ## Output Format
-Four structured narrative sections:
+
+### Narrative Sections (GrokNarrationAgent)
+Five structured narrative sections:
 - **Market Overview**: Price action, valuation, volume/liquidity analysis, 24h market health (max 500 chars)
+- **Token Safety**: Contract control, holder restrictions, security analysis (max 500 chars)
 - **Holder Insights**: Distribution patterns and concentration analysis (max 500 chars)
 - **Risk Assessment**: Risk assessment including bundling analysis (Solana) and 24h market health (all chains) (max 500 chars)
 - **Social & Trends**: Sentiment classification and trending topics (max 500 chars)
+
 
 ## Bundle Analysis Guidelines (Solana Only)
 
@@ -96,6 +100,7 @@ Four structured narrative sections:
 - **Professional Tone**: Analytical and actionable insights
 - **Data Transparency**: Acknowledge limitations and data gaps
 - **Performance**: Complete analysis within 60 seconds total
+- **Risk Management**: Always include risk considerations in decisions
 
 ## Error Handling
 - Graceful degradation when social media APIs fail

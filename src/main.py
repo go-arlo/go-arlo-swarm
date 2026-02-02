@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GoArlo Crypto Summary Bot - Main Entry Point
+GoArlo Token Analysis
 
 A streamlined implementation that:
 1. Fetches market and holder data from external APIs
@@ -14,7 +14,7 @@ import argparse
 import os
 import sys
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set
 from datetime import datetime
 from cachetools import TTLCache
 from asyncio import Event, Semaphore
@@ -26,6 +26,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
 # FastAPI imports
 from fastapi import FastAPI, HTTPException, Depends, Body, Header, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -41,10 +43,25 @@ try:
     # Import telegram_handler instance (circular import resolved via lazy imports in telegram_handler.py)
     import telegram_handler as telegram_handler_module
     telegram_handler = telegram_handler_module.telegram_handler
+    # Import token list router
+    from token_list_router import router as token_list_router
+    from token_list_scheduler import get_scheduler
+    # Import wallet router
+    from wallet_router import router as wallet_router
+    # Import trading router
+    from trading_router import router as trading_router
 except ImportError as e:
     # Handle case where modules aren't found
     print(f"Warning: Import error - {e}")
     telegram_handler = None
+    token_list_router = None
+    wallet_router = None
+    trading_router = None
+
+# Momentum trading imports
+from token_list_fetcher import fetch_token_list, TokenListPresets
+from wallet_fetcher import fetch_wallet_pnl
+from trading_analyzer import TradingAnalyzer, get_conservative_criteria, get_moderate_criteria, get_aggressive_criteria
 
 # In-memory cache and deduplication setup
 # Cache analysis results for 5 minutes (300 seconds)
@@ -55,22 +72,70 @@ analysis_cache = TTLCache(maxsize=1000, ttl=300)
 ongoing_analyses: Dict[str, Dict[str, Any]] = {}
 
 # Concurrency limiter - prevent server overload by limiting concurrent analyses
-# Adjust this based on your server capacity (Railway typically handles 10-20 well)
 analysis_semaphore = Semaphore(10)
 
 # Rate limiter setup
 limiter = Limiter(key_func=get_remote_address)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan events"""
+    # Startup
+    if token_list_router is not None:
+        scheduler = get_scheduler()
+        scheduler.start()
+        print("✅ Token List Scheduler started")
+
+    yield
+
+    # Shutdown
+    if token_list_router is not None:
+        scheduler = get_scheduler()
+        scheduler.stop()
+        print("✅ Token List Scheduler stopped")
+
+
 # FastAPI app setup
 app = FastAPI(
     title="GoArlo Crypto Analysis API",
     description="API for token analysis and extraction",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin for origin in [
+            "https://goarlo.ai",
+            "https://www.goarlo.ai",
+            os.getenv("PUBLIC_URL")
+        ] if origin is not None
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Add rate limiter to app state
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Mount token list router if available
+if token_list_router is not None:
+    app.include_router(token_list_router)
+    print("✅ Token List API routes mounted at /token-list/*")
+
+# Mount wallet router if available
+if wallet_router is not None:
+    app.include_router(wallet_router)
+    print("✅ Wallet API routes mounted at /wallet/*")
+# Mount trading router if available
+if trading_router is not None:
+    app.include_router(trading_router)
+    print("✅ Trading API routes mounted at /trading/*")
 
 # Custom exception handler for validation errors
 @app.exception_handler(RequestValidationError)
@@ -107,14 +172,7 @@ class TokenAnalysisResponse(BaseModel):
     twitter_data: Optional[Dict[str, Any]] = None
 
 # API Key verification
-async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Verify API key for authentication"""
-    expected_key = os.getenv("APP_TOKEN")
-    if not expected_key:
-        raise HTTPException(status_code=500, detail="APP_TOKEN not configured")
-    if x_api_key != expected_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return x_api_key
+from auth import verify_api_key, verify_api_key_optional, get_public_url
 
 
 def format_price(price: float) -> str:
@@ -223,24 +281,28 @@ def _format_market_health(health_data: Dict[str, Any]) -> str:
     return result
 
 
-def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, Any], market_data: Dict = None, analysis_data: Dict = None) -> str:
+def format_token_report(data: Dict[str, Any]) -> str:
     """
-    Format comprehensive token analysis for Twitter posting with full analysis content.
+    Format comprehensive token analysis report.
 
     Args:
-        analysis_response: Full analysis response from the agency
-        token_info: Token information dict with name, symbol, address, chain
-        market_data: Market data dict (price, volume, etc.)
-        analysis_data: Full analysis data including holder data, bundler analysis, etc.
+        data: Full analysis data dict containing token_info, market_data,
+              holder_data, safety_analysis, bundler_analysis, etc.
 
     Returns:
-        Formatted tweet text with complete analysis and metrics
+        Formatted report text with complete analysis and metrics
     """
-    # Create token header with new format
-    formatted_output = f"💠 **Token:** ${token_info['symbol']} 🌐 **Chain:** {token_info['chain'].title()}\n"
-    formatted_output += f"🔗 {token_info['address']}\n"
+    token_info = data.get("token_info", {})
+    market_data = data.get("market_data", {})
 
-    # Add market data section with new icons
+    # Create token header
+    symbol = token_info.get('symbol', 'UNKNOWN')
+    chain = token_info.get('chain', 'unknown').title()
+    address = token_info.get('address', '')
+    formatted_output = f"💠 **Token:** ${symbol} 🌐 **Chain:** {chain}\n"
+    formatted_output += f"🔗 {address}\n"
+
+    # Add market data section
     if market_data:
         formatted_output += "\n📊 Market Data:\n"
         price = market_data.get('price_usd', 0)
@@ -264,8 +326,8 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
             formatted_output += f"  💫 Circulating Supply: {circulating_supply:,}\n"
 
     # Add token safety section
-    if analysis_data and analysis_data.get('safety_analysis'):
-        safety = analysis_data['safety_analysis']
+    if data.get('safety_analysis'):
+        safety = data['safety_analysis']
         formatted_output += "\n🔐 Token Safety:\n"
         
         # Overall risk icon
@@ -280,12 +342,12 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
         formatted_output += f"  {risk_icon} Overall Risk: {overall_risk}\n"
         
         # Chain-specific information
-        chain = token_info.get('chain', '').lower()
+        chain_lower = token_info.get('chain', '').lower()
         key_metrics = safety.get('key_metrics', {})
         contract = safety.get('contract_control', {})
         holder_ctrl = safety.get('holder_control', {})
         
-        if chain == 'solana':
+        if chain_lower == 'solana':
             # Solana: Show contract control separately
             if contract:
                 status_icon = '✅' if contract.get('status') == 'positive' else '⚠️' if contract.get('status') == 'neutral' else '❌'
@@ -350,8 +412,8 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
                 formatted_output += f"  ⚠️ Taxes: Buy {buy_tax}% / Sell {sell_tax}%\n"
 
     # Add holder data section with concentration icons
-    if analysis_data and analysis_data.get('holder_data'):
-        holder_data = analysis_data['holder_data']
+    if data.get('holder_data'):
+        holder_data = data['holder_data']
         formatted_output += "\n👥 Holder Data:\n"
 
         holders = holder_data.get('total_holders', 0)
@@ -362,9 +424,9 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
             icon = holder_icon(concentration)
             formatted_output += f"  Top 10 Concentration: {concentration:.1f}% {icon}\n"
 
-    # Add bundler analysis section for Solana (with new format)
-    if analysis_data and analysis_data.get('bundler_analysis') and token_info.get('chain', '').lower() == 'solana':
-        bundler = analysis_data['bundler_analysis']
+    # Add bundler analysis section for Solana
+    if data.get('bundler_analysis') and token_info.get('chain', '').lower() == 'solana':
+        bundler = data['bundler_analysis']
         formatted_output += "\n🔍 Bundler Analysis:\n"
 
         if bundler.get('bundled_detected'):
@@ -380,9 +442,9 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
             formatted_output += "  ✅ NO BUNDLES DETECTED\n"
             formatted_output += "  🧨 Current Impact Risk: LOW\n"
 
-    # Add 24h market health section with new format
-    if analysis_data and analysis_data.get('market_health_24h'):
-        health = analysis_data['market_health_24h']
+    # Add 24h market health section
+    if data.get('market_health_24h'):
+        health = data['market_health_24h']
         if health.get('market_health_available'):
             formatted_output += "\n📈 24h Market Health:\n"
             formatted_output += f"  Overall Health: {health.get('market_health', 'N/A')}\n"
@@ -407,27 +469,66 @@ def format_analysis_for_twitter(analysis_response: str, token_info: Dict[str, An
             else:
                 formatted_output += f"  Volatility: {volatility}\n"
 
-    # Include the full analysis response (with extra line for separation)
-    formatted_output += "\n" + analysis_response
+    # Add sentiment rating with TweetScout score first, then Grok analysis
+    sentiment_data = data.get("sentiment_data")
+    if sentiment_data:
+        formatted_output += "\n💭 Sentiment Analysis:\n"
+
+        # TweetScout score (first, if available)
+        score = sentiment_data.get("tweet_scout_score")
+        if score is not None:
+            if score >= 1000:
+                rating_icon = '🟢'
+            elif score >= 500:
+                rating_icon = '🟡'
+            elif score >= 200:
+                rating_icon = '🟠'
+            else:
+                rating_icon = '🔴'
+            formatted_output += f"  {rating_icon} TweetScout Score: {score:.2f}\n"
+
+        # Grok sentiment analysis
+        grok_sentiment = sentiment_data.get("grok_sentiment")
+        grok_scam = sentiment_data.get("grok_scam_assessment")
+        grok_overview = sentiment_data.get("grok_overview")
+
+        if grok_sentiment:
+            sentiment_icon = {
+                'Positive': '🟢',
+                'Neutral': '🟡',
+                'Negative': '🔴'
+            }.get(grok_sentiment, '⚪')
+            formatted_output += f"  {sentiment_icon} Grok Sentiment: {grok_sentiment}\n"
+
+        if grok_scam:
+            scam_icon = {
+                'Unlikely': '✅',
+                'Uncertain': '🔶',
+                'Likely': '🚨'
+            }.get(grok_scam, '⚪')
+            formatted_output += f"  {scam_icon} Scam Risk: {grok_scam}\n"
+
+        if grok_overview:
+            formatted_output += f"  📝 {grok_overview}\n"
 
     return formatted_output
 
 
-def preview_tweet_format(analysis_response: str, token_info: Dict[str, Any], market_data: Dict = None, analysis_data: Dict = None) -> str:
+# Alias for backwards compatibility with telegram_handler
+format_analysis_for_twitter = format_token_report
+
+
+def preview_tweet_format(data: Dict[str, Any]) -> str:
     """
     Preview how the analysis will look when formatted for Twitter.
 
     Args:
-        analysis_response: Full analysis response from the agency
-        token_info: Token information dict
-        market_data: Market data dict (optional)
-        analysis_data: Complete analysis data dict (optional)
+        data: Full analysis data dict
 
     Returns:
         Formatted tweet text for preview
     """
-
-    formatted_tweet = format_analysis_for_twitter(analysis_response, token_info, market_data, analysis_data)
+    formatted_tweet = format_token_report(data)
 
     print(f"\n📱 TWITTER PREVIEW ({len(formatted_tweet)} characters):")
     print("─" * 50)
@@ -461,28 +562,22 @@ def extract_tweet_id(twitter_url: str) -> Optional[str]:
 
 
 async def post_twitter_reply(
-    analysis_response: str,
-    token_info: Dict[str, Any],
-    reply_to_tweet: str,
-    market_data: Dict = None,
-    analysis_data: Dict = None
+    data: Dict[str, Any],
+    reply_to_tweet: str
 ) -> Dict[str, Any]:
     """
     Post analysis as a Twitter reply using tweepy
 
     Args:
-        analysis_response: The analysis text to post
-        token_info: Token information dict
+        data: Full analysis data dict
         reply_to_tweet: Tweet ID to reply to
-        market_data: Market data dict (optional)
-        analysis_data: Complete analysis data dict (optional)
 
     Returns:
         Dict with success status and details
     """
     try:
         # Format the analysis for Twitter
-        formatted_tweet = format_analysis_for_twitter(analysis_response, token_info, market_data, analysis_data)
+        formatted_tweet = format_token_report(data)
 
         # Check for required Twitter credentials
         required_vars = [
@@ -588,7 +683,11 @@ async def post_twitter_reply(
 async def analyze_token_with_cache(
     token_address: str,
     chain: str = None,
-    token_symbol: str = None
+    token_symbol: str = None,
+    analyze_for_trading: bool = False,
+    auto_execute: bool = False,
+    input_token: str = "SOL",
+    portfolio_percent: float = None
 ) -> Dict[str, Any]:
     """
     Cached and deduplicated wrapper around analyze_token with concurrency limiting.
@@ -645,7 +744,15 @@ async def analyze_token_with_cache(
             print(f"🔒 Acquired analysis slot for {token_address}")
             
             # Perform the actual analysis
-            result = await analyze_token(token_address, chain, token_symbol)
+            result = await analyze_token(
+                token_address,
+                chain,
+                token_symbol,
+                analyze_for_trading=analyze_for_trading,
+                auto_execute=auto_execute,
+                input_token=input_token,
+                portfolio_percent=portfolio_percent
+            )
             
             # Store result for waiting requests
             ongoing_analyses[cache_key]['result'] = result
@@ -656,7 +763,7 @@ async def analyze_token_with_cache(
                     'result': result,
                     'timestamp': datetime.now()
                 }
-                print(f"💾 Cached analysis result for {token_address}")
+                print(f"💾 Stored fresh analysis result in cache for {token_address}")
             
             # Wake up all waiting requests
             ongoing_analyses[cache_key]['event'].set()
@@ -688,7 +795,11 @@ async def analyze_token_with_cache(
 async def analyze_token(
     token_address: str,
     chain: str = None,
-    token_symbol: str = None
+    token_symbol: str = None,
+    analyze_for_trading: bool = False,
+    auto_execute: bool = False,
+    input_token: str = "SOL",
+    portfolio_percent: float = None
 ) -> Dict[str, Any]:
     """
     Main analysis function that coordinates data fetching and agency processing
@@ -716,6 +827,14 @@ async def analyze_token(
             token_symbol = external_data["token_symbol"]
             print(f"📊 ${token_symbol}")
 
+        # Store trading parameters separately for post-agency analysis
+        trading_params = {
+            "analyze_for_trading": analyze_for_trading,
+            "auto_execute": auto_execute,
+            "input_token": input_token,
+            "portfolio_percent": portfolio_percent
+        }
+
     except Exception as e:
         return {
             "success": False,
@@ -723,148 +842,32 @@ async def analyze_token(
             "data": None,
         }
 
-    # Step 2: Initialize agency with pre-fetched data
-    try:
-        print(f"🤖 Starting agency analysis for ${token_symbol}")
+    # Step 2: Prepare result data (no agency - using Grok sentiment from data fetchers)
+    result_data = {
+        "token_info": {
+            "name": external_data["token_name"],
+            "symbol": token_symbol,
+            "address": token_address,
+            "chain": chain,
+        },
+        "market_data": external_data["market_data"],
+        "holder_data": external_data["holder_data"],
+        "bundler_analysis": external_data.get("bundler_analysis"),
+        "market_health_24h": external_data.get("market_health_24h"),
+        "safety_analysis": external_data.get("safety_analysis"),
+        "sentiment_data": external_data.get("sentiment_data"),
+        "trading_decision": None,
+        "trading_params": trading_params
+    }
 
-        # Create comprehensive message with all context
-        bundler_section = ""
-        if external_data.get('bundler_analysis'):
-            bundler_data = external_data['bundler_analysis']
-            if bundler_data['bundled_detected']:
-                bundler_section = f"""
-        BUNDLER ANALYSIS (Solana):
-        - bundled_detected: True
-        - bundle_cluster_count: {bundler_data['bundle_cluster_count']}
-        - bundled_transaction_percentage: {bundler_data.get('bundled_transaction_percentage', 0)}%
-        - total_bundled_tokens: {bundler_data.get('total_bundled_tokens', 'N/A')}
-        - Creation Time: {bundler_data['creation_info']['created_at'] if bundler_data['creation_info'] else 'Unknown'}"""
+    # Generate formatted analysis for backwards compatibility with telegram/twitter handlers
+    result_data["analysis_response"] = format_token_report(result_data)
 
-                # Add risk metrics if available
-                if bundler_data.get('risk_metrics'):
-                    risk = bundler_data['risk_metrics']
-                    bundler_section += f"""
-        - bundle_intensity_score: {risk.get('bundle_intensity_score', 'N/A')}
-        - early_trading_dominance: {risk.get('early_trading_dominance', 'N/A')}
-        - coordination_sophistication: {risk.get('coordination_sophistication', 'N/A')}"""
-
-                # Add present impact analysis if available
-                if bundler_data.get('present_impact_analysis'):
-                    impact = bundler_data['present_impact_analysis']
-                    bundler_section += f"""
-        - current_impact_risk: {impact.get('current_impact_risk', 'N/A')}
-        - bundled_wallets_count: {impact.get('bundled_wallets_count', 'N/A')}
-        - bundled_wallet_penetration_percentage: {impact.get('bundled_wallet_penetration_percentage', 'N/A')}"""
-
-                # Add price action analysis if available
-                if bundler_data.get('price_action_analysis'):
-                    price_action = bundler_data['price_action_analysis']
-                    bundler_section += f"""
-        - selloff_detected: {price_action.get('selloff_detected', False)}
-        - selloff_severity: {price_action.get('selloff_severity', 'N/A')}
-        - price_decline_from_peak_pct: {price_action.get('price_decline_from_peak_pct', 'N/A')}"""
-
-                # Add cluster details for first few clusters
-                for i, cluster in enumerate(bundler_data['bundle_clusters'][:3]):  # Show max 3 clusters
-                    bundler_section += f"""
-        - Cluster {i+1}: {cluster['cluster_size']} txs, {cluster['unique_wallets']} wallets"""
-            else:
-                bundler_section = f"""
-        BUNDLER ANALYSIS (Solana):
-        - bundled_detected: False
-        - Creation Time: {bundler_data['creation_info']['created_at'] if bundler_data['creation_info'] else 'Unknown'}
-        - Risk Level: LOW (Organic launch pattern)"""
-        elif chain.lower() == "solana":
-            bundler_section = """
-        BUNDLER ANALYSIS (Solana):
-        - Bundle Detection: ❌ ANALYSIS FAILED
-        - Risk Level: UNKNOWN (Unable to assess launch pattern)"""
-
-        message = f"""
-        Analyze token ${token_symbol} with the following pre-fetched data:
-
-        TOKEN INFO:
-        - Name: {external_data['token_name']}
-        - Symbol: {token_symbol}
-        - Address: {token_address}
-        - Chain: {chain}
-
-        MARKET DATA:
-        - Price: ${format_price(external_data['market_data']['price_usd'])}
-        - FDV: ${external_data['market_data']['fdv_usd']:,.0f}
-        - Market Cap: ${external_data['market_data']['market_cap_usd'] or 'N/A'}
-        - 24h Volume: ${external_data['market_data']['volume_24h_usd']:,.0f}
-        - Liquidity: ${external_data['market_data']['liquidity_usd']:,.0f}
-        - Total Supply: {external_data['market_data'].get('total_supply', 'N/A') if external_data['market_data'].get('total_supply') is not None else 'N/A'}
-        - Circulating Supply: {external_data['market_data'].get('circulating_supply', 'N/A') if external_data['market_data'].get('circulating_supply') is not None else 'N/A'}
-
-        HOLDER DATA:
-        {f"- Total Holders: {external_data['holder_data']['total_holders']:,}" if external_data['holder_data'] else "- Holder data unavailable"}
-        {f"- Top 10 Concentration: {external_data['holder_data']['top10_concentration']:.1f}%" if external_data['holder_data'] and external_data['holder_data']['top10_concentration'] else ""}{bundler_section}
-
-        24H MARKET HEALTH:
-        {_format_market_health(external_data.get('market_health_24h'))}
-
-        TOKEN SAFETY ANALYSIS:
-        {_format_safety_analysis(external_data.get('safety_analysis'), chain)}
-
-        Please proceed with:
-        1. Tweet sentiment analysis for ${token_symbol}
-        2. Generate professional narrative sections with NEW TOKEN SAFETY section
-        3. Use bundling risk assessment in Risk Assessment section (not safety section)
-        4. Create Token Safety section using safety analysis data above
-        """
-
-        # Import agency only when needed to avoid early initialization
-        from agency import agency
-
-        # Call agency with all context
-        response = await agency.get_response(message)
-
-        # Clean up any character count artifacts from the response
-        import re
-        cleaned_response = re.sub(r'\s*\(\d+\s+chars?\)', '', response.final_output)
-
-        # Prepare return data
-        result_data = {
-            "token_info": {
-                "name": external_data["token_name"],
-                "symbol": token_symbol,
-                "address": token_address,
-                "chain": chain,
-            },
-            "market_data": external_data["market_data"],
-            "holder_data": external_data["holder_data"],
-            "bundler_analysis": external_data.get("bundler_analysis"),
-            "market_health_24h": external_data.get("market_health_24h"),
-            "safety_analysis": external_data.get("safety_analysis"),
-            "analysis_response": cleaned_response,
-        }
-
-        return {
-            "success": True,
-            "data": result_data,
-            "error": None,
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Agency analysis failed: {str(e)}",
-            "data": {
-                "token_info": {
-                    "name": external_data["token_name"],
-                    "symbol": token_symbol,
-                    "address": token_address,
-                    "chain": chain,
-                },
-                "market_data": external_data["market_data"],
-                "holder_data": external_data["holder_data"],
-                "bundler_analysis": external_data.get("bundler_analysis"),
-                "market_health_24h": external_data.get("market_health_24h"),
-                "safety_analysis": external_data.get("safety_analysis"),
-            },
-        }
+    return {
+        "success": True,
+        "data": result_data,
+        "error": None,
+    }
 
 
 async def search_for_tokens(
@@ -951,11 +954,25 @@ def check_environment(include_twitter: bool = False) -> bool:
 @app.get("/")
 async def root():
     """Root endpoint for health checks"""
+    endpoints = ["/api/extract-token", "/webhook/telegram", "/docs"]
+    if token_list_router is not None:
+        endpoints.extend([
+            "/token-list/fetch",
+            "/token-list/presets",
+            "/token-list/jobs/create",
+            "/token-list/jobs/list"
+        ])
+
     return {
         "service": "GoArlo Crypto Analysis API",
         "status": "healthy",
         "version": "1.0.0",
-        "endpoints": ["/api/extract-token", "/webhook/telegram", "/docs"]
+        "endpoints": endpoints,
+        "features": {
+            "token_analysis": True,
+            "telegram_bot": telegram_handler is not None,
+            "token_list_api": token_list_router is not None
+        }
     }
 
 @app.get("/health")
@@ -964,26 +981,23 @@ async def health_check():
     return {"status": "healthy", "service": "goarlo-api"}
 
 @app.post("/api/extract-token", response_model=TokenAnalysisResponse)
-@limiter.limit("20/minute")  # 20 requests per minute per IP
+@limiter.limit("20/minute")
 async def extract_token_from_text(
     request: Request,
     req_data: TextAnalysisRequest = Body(...),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key")
 ):
     """Extract token, perform analysis, and post Twitter reply (rate limited)"""
-    # Optional API key verification - allows Railway OAuth to work
     if x_api_key:
         expected_key = os.getenv("APP_TOKEN")
         if expected_key and x_api_key != expected_key:
             raise HTTPException(status_code=401, detail="Invalid API key")
     
     try:
-        # Look for contract addresses first (prioritized over symbols)
         address_pattern = r'\b[a-zA-Z0-9]{32,44}\b'
         address_matches = re.findall(address_pattern, req_data.text)
 
         if address_matches:
-            # Use address search
             contract_address = address_matches[0]
             search_results = await search_tokens(
                 keyword=contract_address,
@@ -1000,10 +1014,8 @@ async def extract_token_from_text(
                     twitter_data=None
                 )
 
-            # Use the first result (best match)
             token_data = search_results[0]
         else:
-            # Look for cashtags/symbols
             cashtag_pattern = r'\$([A-Za-z0-9]+)(?=[\s.,!?]|$)'
             cashtag_matches = re.findall(cashtag_pattern, req_data.text)
 
@@ -1016,7 +1028,6 @@ async def extract_token_from_text(
                     twitter_data=None
                 )
 
-            # Use symbol search
             token_symbol = cashtag_matches[0]
             search_results = await search_tokens(
                 keyword=token_symbol,
@@ -1033,7 +1044,6 @@ async def extract_token_from_text(
                     twitter_data=None
                 )
 
-            # Try to find exact symbol match, otherwise use first result
             token_data = search_results[0]
             for result in search_results:
                 if result.symbol.upper() == token_symbol.upper():
@@ -1053,7 +1063,7 @@ async def extract_token_from_text(
             "verified": token_data.verified
         }
 
-        # Step 2: Perform token analysis (with caching and deduplication)
+        # Step 2: Perform token analysis
         try:
             print(f"🤖 Starting analysis for {token_data.name} (${token_data.symbol})")
             analysis_result = await analyze_token_with_cache(
@@ -1091,11 +1101,8 @@ async def extract_token_from_text(
             try:
                 print(f"🐦 Posting Twitter reply to tweet {tweet_id}")
                 twitter_result = await post_twitter_reply(
-                    analysis_response=analysis_result["data"]["analysis_response"],
-                    token_info=analysis_result["data"]["token_info"],
-                    reply_to_tweet=tweet_id,
-                    market_data=analysis_result["data"]["market_data"],
-                    analysis_data=analysis_result["data"]
+                    data=analysis_result["data"],
+                    reply_to_tweet=tweet_id
                 )
 
                 if twitter_result["success"]:
@@ -1140,7 +1147,76 @@ async def telegram_webhook(request: Request):
         return await telegram_handler.process_webhook(request)
     except Exception as e:
         print(f"Error in Telegram webhook: {str(e)}")
-        return {"ok": True}  # Always return OK to Telegram to avoid retries
+        return {"ok": True}
+
+
+async def execute_trade_direct(
+    token_address: str,
+    structured_data: Dict[str, Any],
+    input_token: str = "SOL",
+    portfolio_percent: float = 10.0
+) -> Optional[Dict[str, Any]]:
+    """
+    Execute trade using direct imports (no HTTP calls)
+
+    Args:
+        token_address: Output token address
+        structured_data: Token data from fetch_all_token_data
+        input_token: Input token symbol (default SOL)
+        portfolio_percent: Percentage of input token balance to use
+
+    Returns:
+        Execution result dict or None if failed
+    """
+    try:
+        from trading_tools import AutoExecuteSwap
+        from wallet_fetcher import get_sol_balance
+
+        sol_balance = get_sol_balance() or 0
+        if sol_balance <= 0.01:
+            print(f"❌ Insufficient SOL balance: {sol_balance:.6f}")
+            return {"action_taken": "FAILED", "reason": "Insufficient SOL balance"}
+
+        max_amount = float(os.getenv("MAX_AMOUNT", "0.1"))
+        available = max(0, sol_balance - 0.01)  # Reserve for fees
+        swap_amount = min((portfolio_percent / 100.0) * available, max_amount)
+
+        if swap_amount <= 0:
+            return {"action_taken": "FAILED", "reason": "Calculated swap amount is zero"}
+
+        token_info = structured_data.get("token_info", {})
+        symbol = token_info.get("symbol", "UNKNOWN")
+
+        print(f"💰 Executing trade: {swap_amount:.6f} SOL → ${symbol}")
+
+        swap = AutoExecuteSwap(
+            message_content=f"BUY ${symbol} on Solana",
+            input_token=input_token,
+            token_address=token_address
+        )
+        result = swap.run()
+
+        if result and "❌" not in result:
+            print(f"✅ Trade executed successfully")
+            return {
+                "action_taken": "EXECUTED",
+                "result": result,
+                "swap_details": {
+                    "token_address": token_address,
+                    "token_symbol": symbol,
+                    "amount_sol": swap_amount
+                }
+            }
+        else:
+            print(f"❌ Trade failed: {result}")
+            return {"action_taken": "FAILED", "reason": result}
+
+    except ImportError as e:
+        print(f"❌ Trading tools not available: {e}")
+        return {"action_taken": "FAILED", "reason": "Trading tools not available"}
+    except Exception as e:
+        print(f"❌ Trade execution error: {e}")
+        return {"action_taken": "FAILED", "reason": str(e)}
 
 
 async def main():
@@ -1165,13 +1241,19 @@ Examples:
   # Twitter Integration
   python main.py --address <ADDRESS> --chain <CHAIN> --preview-tweet
   python main.py --address <ADDRESS> --chain <CHAIN> --reply-to-tweet 1234567890
+
+  # Trading Analysis
+  python main.py --address <ADDRESS> --chain <CHAIN> --analyze-for-trading
+  python main.py --address <ADDRESS> --chain <CHAIN> --analyze-for-trading --auto-execute
+  python main.py --address <ADDRESS> --chain <CHAIN> --analyze-for-trading --auto-execute --input-token USDC
+  python main.py --address <ADDRESS> --chain <CHAIN> --analyze-for-trading --auto-execute --portfolio-percent 10
         """,
     )
 
-    # Create mutually exclusive group for address vs search
     token_group = parser.add_mutually_exclusive_group(required=True)
     token_group.add_argument("--address", help="Token contract address")
     token_group.add_argument("--search", help="Search for tokens by symbol, name, or address")
+    token_group.add_argument("--momentum", action="store_true", help="Fetch and analyze top momentum tokens")
 
     parser.add_argument(
         "--chain", help="Blockchain (solana, ethereum, base, bnb, shibarium)"
@@ -1195,19 +1277,52 @@ Examples:
     parser.add_argument(
         "--preview-tweet", action="store_true", help="Preview tweet format without posting"
     )
+    parser.add_argument(
+        "--analyze-for-trading", action="store_true", help="Analyze token report for trading decisions"
+    )
+    parser.add_argument(
+        "--auto-execute", action="store_true", help="Auto-execute trades if analysis recommends BUY"
+    )
+    parser.add_argument(
+        "--input-token", default="SOL", help="Input token for trading (default: SOL)"
+    )
+    parser.add_argument(
+        "--portfolio-percent",
+        type=float,
+        help="Percentage of input token balance to use for trade (e.g., 10 = use 10%% of SOL balance)"
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear analysis cache before running"
+    )
+
+    # Momentum trading options
+    parser.add_argument(
+        "--risk-profile",
+        choices=["strict", "conservative", "moderate", "aggressive"],
+        default="strict",
+        help="Trading risk profile for --momentum (default: strict - safest)"
+    )
 
     args = parser.parse_args()
+
+    if args.clear_cache:
+        analysis_cache.clear()
+        ongoing_analyses.clear()
+        print("🧹 Cleared analysis cache")
+        if not (args.address or args.search):
+            print("Cache cleared successfully!")
+            return
 
     print("🚀 GoArlo Crypto Summary Bot")
     print("=" * 40)
 
-    # Check environment (include Twitter if tweet functionality requested)
     include_twitter = bool(args.reply_to_tweet or args.preview_tweet)
     if not check_environment(include_twitter=include_twitter):
         return
 
     try:
-        # Handle search functionality
         if args.search:
             from token_search import search_tokens, display_search_results
 
@@ -1220,7 +1335,6 @@ Examples:
                 limit=min(args.search_limit, 20)  # Cap at 20
             )
 
-            # Wrap results in expected format for display function
             if search_results:
                 search_result = {
                     "success": True,
@@ -1237,197 +1351,124 @@ Examples:
             display_search_results(search_result)
             return
 
-        # Validate that chain is provided when using --address
+        elif args.momentum:
+            from trading_system import ComprehensiveTradingSystem
+
+            system = ComprehensiveTradingSystem(
+                dry_run=not args.auto_execute,
+                risk_profile=args.risk_profile,
+                enable_auto_sell=False,
+                max_trade_amount=args.portfolio_percent / 100 if args.portfolio_percent else None
+            )
+
+            await system.run(cycles=1, interval_minutes=1)
+            return
+
         if args.address and not args.chain:
             print("❌ Error: --chain is required when using --address")
             print("Example: python main.py --address <ADDRESS> --chain solana")
             return
 
-        # Run analysis for specific token address (with caching and deduplication)
+        # Run analysis for specific token address
         result = await analyze_token_with_cache(
             token_address=args.address,
             chain=args.chain,
-            token_symbol=args.symbol
+            token_symbol=args.symbol,
+            analyze_for_trading=args.analyze_for_trading,
+            auto_execute=args.auto_execute,
+            input_token=args.input_token,
+            portfolio_percent=args.portfolio_percent
         )
 
         if result["success"]:
-            token_info = result["data"]["token_info"]
-            market = result["data"]["market_data"]
+            formatted_output = format_token_report(result["data"])
+            print(formatted_output)
 
-            print(f"\n💠 **Token:** ${token_info['symbol']} 🌐 **Chain:** {token_info['chain'].title()}")
-            print(f"🔗 {token_info['address']}")
+            if result["data"].get("trading_params", {}).get("analyze_for_trading"):
+                print("\n🔍 Running trading analysis...")
 
-            print("\n📊 Market Data:")
-            print(f"  💰 Price: ${format_price(market['price_usd'])}")
-            print(f"  🧮 FDV: ${market['fdv_usd']:,.0f}")
-            print(f"  💧 Liquidity: ${market['liquidity_usd']:,.0f}")
-            print(f"  🔁 24h Volume: ${market['volume_24h_usd']:,.0f}")
+                analyzer = TradingAnalyzer(criteria=get_conservative_criteria())
+                recommendation = analyzer.analyze_structured_data(result["data"])
 
-            if market.get('total_supply') is not None:
-                print(f"  🪙 Total Supply: {market['total_supply']:,}")
-            if market.get('circulating_supply') is not None:
-                print(f"  💫 Circulating Supply: {market['circulating_supply']:,}")
+                trading_result = {
+                    "action": recommendation.action,
+                    "confidence": recommendation.confidence,
+                    "position_size_percent": recommendation.position_size_percent,
+                    "reasoning": recommendation.reasoning,
+                    "risk_factors": recommendation.risk_factors,
+                    "criteria_results": recommendation.criteria_met
+                }
 
-            if result["data"]["holder_data"]:
-                holder = result["data"]["holder_data"]
-                print("\n👥 Holder Data:")
-                print(f"  Total Holders: {holder['total_holders']:,}")
-                if holder["top10_concentration"]:
-                    concentration = holder['top10_concentration']
-                    icon = holder_icon(concentration)
-                    print(f"  Top 10 Concentration: {concentration:.1f}% {icon}")
+                print(f"🎯 Trading Analysis Complete:")
+                print(f"  Action: {trading_result['action']}")
+                print(f"  Confidence: {trading_result['confidence']:.1%}")
 
-            # Display Token Safety section
-            safety = result["data"].get("safety_analysis")
-            if safety:
-                print("\n🔐 Token Safety:")
+                # Auto-execute if requested and action is BUY
+                if result["data"]["trading_params"].get("auto_execute") and trading_result["action"] == "BUY":
+                    print("🚀 Auto-executing trade...")
+                    execution_result = await execute_trade_direct(
+                        token_address=args.address,
+                        structured_data=result["data"],
+                        input_token=result["data"]["trading_params"].get("input_token", "SOL"),
+                        portfolio_percent=result["data"]["trading_params"].get("portfolio_percent", 10.0)
+                    )
+                    if execution_result:
+                        trading_result["execution"] = execution_result
 
-                # Overall risk icon
-                overall_risk = safety.get('overall_risk', 'UNKNOWN')
-                risk_icon = {
-                    'HIGH': '🔴',
-                    'MEDIUM': '🟠',
-                    'LOW': '🟢',
-                    'UNKNOWN': '⚪'
-                }.get(overall_risk, '⚪')
+                result["data"]["trading_decision"] = trading_result
 
-                print(f"  {risk_icon} Overall Risk: {overall_risk}")
+            if result["data"].get("trading_decision"):
+                trading = result["data"]["trading_decision"]
+                print("\n" + "=" * 60)
+                print("🎯 TRADING ANALYSIS")
+                print("=" * 60)
 
-                # Chain-specific information
-                chain = token_info.get('chain', '').lower()
-                key_metrics = safety.get('key_metrics', {})
-                contract = safety.get('contract_control', {})
-                holder_ctrl = safety.get('holder_control', {})
+                if isinstance(trading, dict):
+                    print(f"📊 Action: {trading.get('action', 'N/A')}")
+                    print(f"🎯 Confidence: {trading.get('confidence', 0):.1%}")
 
-                if chain == 'solana':
-                    # Solana: Show contract control separately
-                    if contract:
-                        status_icon = '✅' if contract.get('status') == 'positive' else '⚠️' if contract.get('status') == 'neutral' else '❌'
-                        print(f"  {status_icon} Contract: {contract.get('reason', 'No data')}")
+                    if trading.get('position_size_percent'):
+                        print(f"📈 Position Size: {trading.get('position_size_percent'):.1f}%")
 
-                    # Solana: Show holder control
-                    if holder_ctrl:
-                        status_icon = '✅' if holder_ctrl.get('status') == 'positive' else '⚠️' if holder_ctrl.get('status') == 'neutral' else '❌'
-                        print(f"  {status_icon} Holder Control: {holder_ctrl.get('reason', 'No data')}")
+                    if trading.get('reasoning'):
+                        print(f"\n✅ Positive Factors:")
+                        for reason in trading.get('reasoning', []):
+                            print(f"  • {reason}")
 
-                    # Solana-specific metrics
-                    if key_metrics.get('jupiter_strict_list'):
-                        print(f"  ✅ Jupiter Strict List: Verified")
+                    if trading.get('risk_factors'):
+                        print(f"\n⚠️  Risk Factors:")
+                        for risk in trading.get('risk_factors', []):
+                            print(f"  • {risk}")
 
-                    if key_metrics.get('mutable_metadata'):
-                        print(f"  ⚠️ Metadata: Mutable")
+                    print(f"\n💰 Trade Execution:")
+                    if trading.get('execution'):
+                        execution = trading['execution']
+                        print(f"  Status: {execution.get('action_taken', 'N/A')}")
+                        if execution.get('execution_result'):
+                            print(f"  Result: {execution.get('execution_result')}")
                     else:
-                        print(f"  ✅ Metadata: Immutable")
+                        auto_execute_requested = result["data"]["trading_params"].get("auto_execute", False)
+                        action_is_buy = trading.get("action") == "BUY"
+
+                        if auto_execute_requested and action_is_buy:
+                            print(f"  Status: FAILED (execution not completed)")
+                        elif auto_execute_requested and not action_is_buy:
+                            print(f"  Status: SKIPPED (action was {trading.get('action', 'N/A')}, not BUY)")
+                        else:
+                            print(f"  Status: DISABLED (auto-execute not requested)")
                 else:
-                    # EVM: Show contract control and security checks
-                    security = safety.get('security_checks', {})
+                    print(trading)
 
-                    # Check status
-                    contract_positive = contract.get('status') == 'positive'
-                    security_positive = security.get('status') == 'positive'
-                    is_open_source = key_metrics.get('is_open_source', False)
+                print("=" * 60)
 
-                    # Always show Contract line (renouncement status)
-                    if contract:
-                        status_icon = '✅' if contract_positive else '⚠️' if contract.get('status') == 'neutral' else '❌'
-                        print(f"  {status_icon} Contract: {contract.get('reason', 'No data')}")
-
-                    # Show Security line
-                    if security_positive and is_open_source:
-                        # All security checks passed - show combined positive message
-                        verified_items = []
-                        if is_open_source:
-                            verified_items.append("Open source")
-                        if not key_metrics.get('is_honeypot', False):
-                            verified_items.append("No honeypot")
-                        if not key_metrics.get('is_blacklisted', False):
-                            verified_items.append("Not blacklisted")
-
-                        print(f"  ✅ Security: Verified ({', '.join(verified_items)})")
-                    else:
-                        # Show security issues
-                        if security and security.get('status') != 'positive':
-                            status_icon = '⚠️' if security.get('status') == 'neutral' else '❌'
-                            print(f"  {status_icon} Security: {security.get('reason', 'No data')}")
-                        elif not is_open_source:
-                            print(f"  ⚠️ Security: Closed source contract")
-
-                    # EVM: Show holder control
-                    if holder_ctrl:
-                        status_icon = '✅' if holder_ctrl.get('status') == 'positive' else '⚠️' if holder_ctrl.get('status') == 'neutral' else '❌'
-                        print(f"  {status_icon} Holder Control: {holder_ctrl.get('reason', 'No data')}")
-
-                    # Show taxes if present
-                    buy_tax = key_metrics.get('buy_tax', 0)
-                    sell_tax = key_metrics.get('sell_tax', 0)
-                    if buy_tax > 0 or sell_tax > 0:
-                        print(f"  ⚠️ Taxes: Buy {buy_tax}% / Sell {sell_tax}%")
-            else:
-                # No safety analysis data available
-                print("\n🔐 Token Safety:")
-                print(f"  ⚠️ Safety analysis not available for {token_info.get('chain', 'this')} chain")
-
-            # Display bundler analysis results if available (Solana only)
-            if result["data"].get("bundler_analysis"):
-                bundler = result["data"]["bundler_analysis"]
-                print("\n🔍 Bundler Analysis:")
-
-                if bundler["bundled_detected"]:
-                    bundled_pct = bundler.get("bundled_transaction_percentage", 0)
-                    print(f"  ⚠️  EARLY BUNDLES DETECTED: {bundled_pct:.1f}% (first 300 txs)")
-
-                    # Show current impact risk if available
-                    if bundler.get("present_impact_analysis"):
-                        impact = bundler["present_impact_analysis"]
-                        print(f"  🧨 Current Impact Risk: {impact.get('current_impact_risk', 'N/A')}")
-                else:
-                    print(f"  ✅ NO BUNDLES DETECTED")
-                    print(f"  🧨 Current Impact Risk: LOW")
-
-            elif token_info["chain"].lower() == "solana":
-                print("\n🔍 Bundler Analysis:")
-                print("  ❌ Analysis failed or unavailable")
-
-            # Display 24h market health if available
-            if result["data"].get("market_health_24h"):
-                health = result["data"]["market_health_24h"]
-                print("\n📈 24h Market Health:")
-
-                if health.get("market_health_available"):
-                    print(f"  Overall Health: {health.get('market_health', 'N/A')}")
-                    buy_pct = health.get('buy_pressure_pct', 'N/A')
-                    sell_pct = health.get('sell_pressure_pct', 'N/A')
-                    pressure_dominance = health.get('pressure_dominance', 'N/A')
-                    if buy_pct != 'N/A' and sell_pct != 'N/A':
-                        print(f"  Buy/Sell Pressure: {buy_pct:.1f}% / {sell_pct:.1f}% ({pressure_dominance})")
-                    else:
-                        print(f"  Buy/Sell Pressure: {buy_pct} / {sell_pct} ({pressure_dominance})")
-                    vol_change = health.get('volume_change_pct')
-                    if vol_change is not None:
-                        print(f"  Volume Change: {vol_change:+.1f}%")
-                    else:
-                        print(f"  Volume Change: N/A")
-                    volatility = health.get('avg_volatility_pct', 'N/A')
-                    if volatility != 'N/A':
-                        print(f"  Volatility: {volatility:.1f}%")
-                    else:
-                        print(f"  Volatility: {volatility}")
-                else:
-                    print(f"  ⚠️ {health.get('analysis_note', 'Analysis unavailable')}")
-
-            print(result["data"]["analysis_response"])
-
-            # Handle Twitter functionality
             if args.preview_tweet or args.reply_to_tweet:
                 print("\n🐦 Twitter Integration:")
                 if args.preview_tweet:
-                    preview_tweet_format(result["data"]["analysis_response"], result["data"]["token_info"])
+                    preview_tweet_format(result["data"])
 
                 if args.reply_to_tweet:
-                    # Post Twitter reply using separate function
                     twitter_result = await post_twitter_reply(
-                        analysis_response=result["data"]["analysis_response"],
-                        token_info=result["data"]["token_info"],
+                        data=result["data"],
                         reply_to_tweet=args.reply_to_tweet
                     )
 
@@ -1454,7 +1495,6 @@ Examples:
 
 
 if __name__ == "__main__":
-    # Check if running as CLI
     is_cli_mode = len(sys.argv) > 1 and sys.argv[1] == "--cli"
 
     if is_cli_mode:
